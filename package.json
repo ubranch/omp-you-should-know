@@ -1,0 +1,33 @@
+{
+	"name": "omp-you-should-know",
+	"version": "0.1.0",
+	"description": "A side agent watches your back while omp works and flags things you might miss, in a card above the prompt.",
+	"license": "MIT",
+	"type": "module",
+	"keywords": ["pi-package", "pi-extension", "omp", "oh-my-pi"],
+	"homepage": "https://github.com/ubranch/omp-you-should-know#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ubranch/omp-you-should-know.git"
+	},
+	"files": ["src", "README.md", "LICENSE"],
+	"pi": {
+		"extensions": ["./src/index.ts"]
+	},
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc --noEmit"
+	},
+	"peerDependencies": {
+		"@oh-my-pi/pi-ai": "*",
+		"@oh-my-pi/pi-coding-agent": "*",
+		"@oh-my-pi/pi-tui": "*"
+	},
+	"devDependencies": {
+		"@oh-my-pi/pi-ai": "18.4.9",
+		"@oh-my-pi/pi-coding-agent": "18.4.9",
+		"@oh-my-pi/pi-tui": "18.4.9",
+		"@types/bun": "^1.2.0",
+		"typescript": "^5.9.0"
+	}
+}

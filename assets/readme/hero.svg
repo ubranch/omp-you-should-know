@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430"
+     role="img" aria-labelledby="t d">
+  <title id="t">you should know</title>
+  <desc id="d">you should know, an omp extension: a side agent reads the session and, when something matters,
+  puts one card above the prompt. The card shown is real output from a test run: Risk, two payment tests
+  were skipped because DATABASE_URL was not set, despite the agent reporting the test suite as green.</desc>
+
+  <rect width="1200" height="430" rx="24" fill="#0A0A0A"/>
+  <rect x="0.5" y="0.5" width="1199" height="429" rx="24" fill="none" stroke="#1C1C1F"/>
+
+  <g id="title-block">
+    <text x="72" y="68" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
+          font-size="20" letter-spacing="4" fill="#F97316">OMP EXTENSION</text>
+    <text x="68" y="144" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,sans-serif"
+          font-size="84" font-weight="800" letter-spacing="-3" fill="#FAFAFA">you should know</text>
+    <text x="72" y="194" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
+          font-size="22" fill="#71717A">a side agent reads along. one card when you'd miss something.</text>
+  </g>
+
+  <g id="metadata" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="18"
+     fill="#52525B" text-anchor="end">
+    <text x="1128" y="68">checks every 6th step</text>
+    <text x="1128" y="96">side model @smol</text>
+    <text x="1128" y="124">never starts a turn</text>
+  </g>
+
+  <g id="omp-pane" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+    <rect x="64" y="220" width="1072" height="180" rx="14" fill="#111113" stroke="#1C1C1F"/>
+    <text x="104" y="264" font-size="20" fill="#E4E4E7"><tspan font-weight="700" fill="#F97316">Risk</tspan><tspan fill="#52525B"> · </tspan>Two payment tests were skipped because DATABASE_URL was not set,</text>
+    <text x="104" y="296" font-size="20" fill="#E4E4E7">despite the agent reporting the test suite as green.</text>
+    <text x="104" y="332" font-size="18" fill="#71717A" xml:space="preserve">1: Learn more   2: Know this already   0: Dismiss</text>
+    <line x1="88" y1="352" x2="1112" y2="352" stroke="#27272A" stroke-width="2"/>
+    <text x="104" y="384" font-size="20" fill="#A1A1AA">❯</text>
+    <rect x="130" y="367" width="11" height="22" fill="#E4E4E7"/>
+  </g>
+</svg>
