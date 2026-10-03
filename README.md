@@ -1,7 +1,7 @@
 <div align="center">
 
 <img src="./assets/readme/hero.svg" width="100%"
-     alt="you should know, an omp extension. The card in the image says: Heads up · two payment tests were skipped because DATABASE_URL is not set, so the transaction logic is not verified.">
+     alt="you should know, an omp extension. The card in the image says: Heads up · Two payment tests were silently skipped because DATABASE_URL is not set, leaving critical transaction logic unverified.">
 
 <p>
 <img src="https://img.shields.io/badge/typescript-1E1E22?style=flat-square" alt="TypeScript">
