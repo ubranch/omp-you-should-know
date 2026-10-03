@@ -91,9 +91,23 @@ export function pruneSeen(seen: readonly SeenTopic[], now: number): SeenTopic[] 
 	return seen.filter(s => now - s.at < SEEN_KEEP_MS).slice(-SEEN_MAX);
 }
 
-export function wasSeen(seen: readonly SeenTopic[], topic: string): boolean {
+export function wasSeen(topics: readonly string[], topic: string): boolean {
 	const key = topicKey(topic);
-	return seen.some(s => topicKey(s.topic) === key);
+	return topics.some(t => topicKey(t) === key);
+}
+
+/** Records a topic the person said they knew or understood; the newest SEEN_MAX are kept, with no expiry. */
+export function addKnown(known: readonly string[], topic: string): string[] {
+	const key = topicKey(topic);
+	return [...known.filter(t => topicKey(t) !== key), topic].slice(-SEEN_MAX);
+}
+
+/**
+ * Automatic checks to skip after cards were cleared unanswered this many times in a row:
+ * none for the first two, then 1, 2, 4 … up to 16. Any answer to a card resets the run.
+ */
+export function checksToSkipAfter(ignoredInARow: number): number {
+	return ignoredInARow <= 2 ? 0 : Math.min(16, 2 ** (ignoredInARow - 3));
 }
 
 // ---------------------------------------------------------------------------

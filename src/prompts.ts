@@ -53,11 +53,20 @@ ${EXPLAIN_RULES}
 
 ${DEPTH.first}`;
 
-export function checkRequest(transcript: string, seen: readonly SeenTopic[]): string {
-	const shown = seen.length
-		? `\n\nAlready shown to them recently; do not raise these again or anything that is the same point:\n${seen.map(s => `- ${s.topic}`).join("\n")}`
-		: "";
-	return `<session>\n${transcript}\n</session>${shown}\n\nIs there one thing they should know? Answer in the required form.`;
+function topicList(heading: string, topics: readonly string[]): string {
+	return topics.length ? `\n\n${heading}\n${topics.map(t => `- ${t}`).join("\n")}` : "";
+}
+
+export function checkRequest(transcript: string, seen: readonly SeenTopic[], known: readonly string[]): string {
+	const shown = topicList(
+		"Already shown to them recently; do not raise these again or anything that is the same point:",
+		seen.map(s => s.topic),
+	);
+	const understood = topicList(
+		"They have said they already understand these; skip them, including the same point put another way:",
+		known,
+	);
+	return `<session>\n${transcript}\n</session>${shown}${understood}\n\nIs there one thing they should know? Answer in the required form.`;
 }
 
 export const EXPLAIN_SYSTEM = `You explain one point from a coding agent's session to the person running it. ${READER}

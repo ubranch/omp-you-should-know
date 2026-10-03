@@ -14,8 +14,10 @@ import { Markdown, matchesKey, shimmerEnabled, shimmerText, type TUI, truncateTo
 import {
 	type Action,
 	actionFor,
+	addKnown,
 	buildTranscript,
 	CLEAR_AFTER_PROMPTS,
+	checksToSkipAfter,
 	choiceLines,
 	type Depth,
 	EXPLAINED_CHOICES,
@@ -51,17 +53,31 @@ const DEBUG = process.env.OMP_YSK_DEBUG === "1";
 interface Store {
 	enabled: boolean;
 	seen: SeenTopic[];
+	/** Topics the person said they knew or understood. */
+	known: string[];
+	/** Cards cleared by prompts without an answer, in a row. */
+	ignoredInARow: number;
+	/** Automatic checks still to skip because of that run. */
+	checksToSkip: number;
 }
 
+const count = (value: unknown) => (Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : 0);
+
 function readStore(): Store {
-	if (!fs.existsSync(STORE_FILE)) return { enabled: true, seen: [] };
+	if (!fs.existsSync(STORE_FILE)) return { enabled: true, seen: [], known: [], ignoredInARow: 0, checksToSkip: 0 };
 	let raw: Partial<Store>;
 	try {
 		raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf8")) as Partial<Store>;
 	} catch (error) {
 		throw new Error(`${STORE_FILE} is not valid JSON; fix or delete it: ${String(error)}`);
 	}
-	return { enabled: raw.enabled !== false, seen: pruneSeen(Array.isArray(raw.seen) ? raw.seen : [], Date.now()) };
+	return {
+		enabled: raw.enabled !== false,
+		seen: pruneSeen(Array.isArray(raw.seen) ? raw.seen : [], Date.now()),
+		known: Array.isArray(raw.known) ? raw.known.filter(topic => typeof topic === "string") : [],
+		ignoredInARow: count(raw.ignoredInARow),
+		checksToSkip: count(raw.checksToSkip),
+	};
 }
 
 // ponytail: read-modify-write without a lock; two omp sessions writing in the same instant can drop one seen topic.
@@ -211,19 +227,26 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 	}
 
 	function startCheck(ctx: ExtensionContext, manual: boolean) {
-		const busy = !readStore().enabled ? "it is off (/ysk on)" : inFlight ? "a check is already running" : view ? "a card is already showing" : undefined;
+		const store = readStore();
+		const busy = !store.enabled ? "it is off (/ysk on)" : inFlight ? "a check is already running" : view ? "a card is already showing" : undefined;
 		if (busy) {
 			if (manual) ctx.ui.notify(`${NAME}: not checking, ${busy}.`, "info");
+			return;
+		}
+		// Cards ignored in a row thin out automatic checks; /ysk check always runs.
+		if (!manual && store.checksToSkip > 0) {
+			updateStore(current => ({ ...current, checksToSkip: Math.max(current.checksToSkip - 1, 0) }));
+			if (DEBUG) ctx.ui.notify(`${NAME}: skipped a check after ${store.ignoredInARow} ignored cards; ${store.checksToSkip - 1} more to skip.`, "info");
 			return;
 		}
 		const abort = new AbortController();
 		inFlight = abort;
 		if (manual) ctx.ui.notify(`${NAME}: checking the session…`, "info");
 		void (async () => {
-			const { seen } = readStore();
-			const finding = parseCheckReply(await ask(ctx, CHECK_SYSTEM, checkRequest(transcript(ctx), seen), abort.signal));
+			const { seen, known } = store;
+			const finding = parseCheckReply(await ask(ctx, CHECK_SYSTEM, checkRequest(transcript(ctx), seen, known), abort.signal));
 			if (abort.signal.aborted || view) return;
-			if (!finding || wasSeen(seen, finding.topic)) {
+			if (!finding || wasSeen([...seen.map(s => s.topic), ...known], finding.topic)) {
 				if (manual || DEBUG) ctx.ui.notify(`${NAME}: nothing worth flagging right now.`, "info");
 				return;
 			}
@@ -272,19 +295,27 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	function act(action: Action, ctx: ExtensionContext) {
 		if (!view) return;
-		if (action === "learn" && view.finding.explanation) {
-			view = { kind: "explained", finding: view.finding, text: view.finding.explanation };
+		const { finding } = view;
+		if (action === "chat" && ctx.ui.getEditorText().trim()) {
+			ctx.ui.notify("Your prompt box has text in it. Send or clear it, then press 2 again.", "warning");
+			return;
+		}
+		// Any answer ends a run of ignored cards. Knowing, understanding or taking a topic to chat keeps it out of
+		// later checks.
+		const known = action === "know" || action === "understood" || action === "chat";
+		updateStore(store => ({
+			...store,
+			ignoredInARow: 0,
+			checksToSkip: 0,
+			known: known ? addKnown(store.known, finding.topic) : store.known,
+		}));
+		if (action === "learn" && finding.explanation) {
+			view = { kind: "explained", finding, text: finding.explanation };
 			return render(ctx);
 		}
 		if (action === "learn") return explain(ctx, "first");
 		if (action === "simpler" || action === "shorter" || action === "more") return explain(ctx, action);
-		if (action === "chat" && view.kind === "explained") {
-			if (ctx.ui.getEditorText().trim()) {
-				ctx.ui.notify("Your prompt box has text in it. Send or clear it, then press 2 again.", "warning");
-				return;
-			}
-			ctx.ui.setEditorText(chatDraft(view.finding, view.text));
-		}
+		if (action === "chat" && view.kind === "explained") ctx.ui.setEditorText(chatDraft(finding, view.text));
 		clear(ctx);
 	}
 
@@ -325,8 +356,15 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		// omp runs input handlers for slash commands too; only prompts to the agent count.
 		if (event.source !== "interactive" || !isPrompt(event.text) || view?.kind !== "offer") return;
 		const promptsSince = view.promptsSince + 1;
-		if (promptsSince >= CLEAR_AFTER_PROMPTS) clear(ctx);
-		else view = { ...view, promptsSince };
+		if (promptsSince < CLEAR_AFTER_PROMPTS) {
+			view = { ...view, promptsSince };
+			return;
+		}
+		clear(ctx);
+		updateStore(store => {
+			const ignoredInARow = store.ignoredInARow + 1;
+			return { ...store, ignoredInARow, checksToSkip: checksToSkipAfter(ignoredInARow) };
+		});
 	});
 
 	pi.on("turn_end", (event, ctx) => {
@@ -351,9 +389,12 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			if (arg === "check") return startCheck(ctx, true);
 			if (arg === "") {
 				const model = ctx.models.resolve(MODEL);
-				const state = readStore().enabled ? "on" : "off";
+				const store = readStore();
+				const skipping = store.checksToSkip
+					? `; ${store.ignoredInARow} cards ignored in a row, so the next ${store.checksToSkip === 1 ? "automatic check" : `${store.checksToSkip} automatic checks`} will not run`
+					: "";
 				ctx.ui.notify(
-					`${NAME} is ${state}; side model ${model ? `${model.provider}/${model.id}` : `missing (${MODEL})`}; card: ${view?.kind ?? "none"}. Try /ysk check.`,
+					`${NAME} is ${store.enabled ? "on" : "off"}; side model ${model ? `${model.provider}/${model.id}` : `missing (${MODEL})`}; card: ${view?.kind ?? "none"}${skipping}. Try /ysk check.`,
 					"info",
 				);
 				return;

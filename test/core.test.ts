@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
 	actionFor,
+	addKnown,
 	buildTranscript,
+	checksToSkipAfter,
 	choiceLines,
 	DEFAULT_TAG,
 	EXPLAINED_CHOICES,
@@ -20,7 +22,7 @@ import {
 	type TranscriptEntry,
 	wasSeen,
 } from "../src/core.ts";
-import { chatDraft } from "../src/prompts.ts";
+import { chatDraft, checkRequest } from "../src/prompts.ts";
 
 const plain: Ink = { accent: s => s, dim: s => s };
 
@@ -82,9 +84,28 @@ describe("seen topics", () => {
 	});
 
 	test("match ignoring case and punctuation", () => {
-		expect(wasSeen([{ topic: "Prompt caching costs MORE!", at: now }], "prompt caching costs more")).toBe(true);
-		expect(wasSeen([{ topic: "something else", at: now }], "prompt caching costs more")).toBe(false);
+		expect(wasSeen(["Prompt caching costs MORE!"], "prompt caching costs more")).toBe(true);
+		expect(wasSeen(["something else"], "prompt caching costs more")).toBe(false);
 	});
+});
+
+test("known topics stay unique, newest last, capped at SEEN_MAX", () => {
+	expect(addKnown(["A thing.", "B thing."], "a THING")).toEqual(["B thing.", "a THING"]);
+	const many = Array.from({ length: SEEN_MAX + 3 }, (_, i) => `t${i}`).reduce(addKnown, [] as string[]);
+	expect(many).toHaveLength(SEEN_MAX);
+	expect(many[0]).toBe("t3");
+});
+
+test("checks back off after the third card ignored in a row", () => {
+	expect([0, 1, 2, 3, 4, 5, 6, 7, 8, 20].map(checksToSkipAfter)).toEqual([0, 0, 0, 1, 2, 4, 8, 16, 16, 16]);
+});
+
+test("the check request lists shown and known topics only when there are some", () => {
+	expect(checkRequest("T", [], [])).not.toContain("- ");
+	const request = checkRequest("T", [{ topic: "Shown one.", at: 0 }], ["Known one."]);
+	expect(request).toContain("- Shown one.");
+	expect(request).toContain("already understand these");
+	expect(request).toContain("- Known one.");
 });
 
 describe("buildTranscript", () => {
