@@ -160,7 +160,9 @@ function linesOf(entry: TranscriptEntry): string[] {
 	const lines: string[] = [];
 	for (const part of partsOf(message.content)) {
 		if (part.type === "text" && String(part.text ?? "").trim()) lines.push(`AGENT: ${part.text}`);
-		else if (part.type === "thinking") lines.push(`AGENT THINKING: ${clip(String(part.thinking ?? ""), MAX_THINKING)}`);
+		// Some providers send redacted thinking as an empty part.
+		else if (part.type === "thinking" && String(part.thinking ?? "").trim())
+			lines.push(`AGENT THINKING: ${clip(String(part.thinking), MAX_THINKING)}`);
 		else if (part.type === "toolCall")
 			lines.push(`AGENT CALLS ${part.name}: ${clip(JSON.stringify(part.arguments ?? {}), MAX_TOOL_ARGS)}`);
 	}

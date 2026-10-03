@@ -111,7 +111,7 @@ test("the check request lists shown and known topics only when there are some", 
 describe("buildTranscript", () => {
 	const user = (text: string): TranscriptEntry => ({ type: "message", message: { role: "user", content: text } });
 
-	test("renders messages, tool calls and failed tool results", () => {
+	test("renders messages, tool calls and failed tool results; drops empty thinking", () => {
 		const out = buildTranscript(
 			[
 				user("fix the login"),
@@ -120,6 +120,7 @@ describe("buildTranscript", () => {
 					message: {
 						role: "assistant",
 						content: [
+							{ type: "thinking", thinking: " " },
 							{ type: "text", text: "Looking." },
 							{ type: "toolCall", name: "bash", arguments: { command: "rm -rf dist" } },
 						],
