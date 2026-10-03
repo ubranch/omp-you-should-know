@@ -55,16 +55,10 @@ interface Store {
 	seen: SeenTopic[];
 	/** Topics the person said they knew or understood. */
 	known: string[];
-	/** Cards cleared by prompts without an answer, in a row. */
-	ignoredInARow: number;
-	/** Automatic checks still to skip because of that run. */
-	checksToSkip: number;
 }
 
-const count = (value: unknown) => (Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : 0);
-
 function readStore(): Store {
-	if (!fs.existsSync(STORE_FILE)) return { enabled: true, seen: [], known: [], ignoredInARow: 0, checksToSkip: 0 };
+	if (!fs.existsSync(STORE_FILE)) return { enabled: true, seen: [], known: [] };
 	let raw: Partial<Store>;
 	try {
 		raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf8")) as Partial<Store>;
@@ -75,8 +69,6 @@ function readStore(): Store {
 		enabled: raw.enabled !== false,
 		seen: pruneSeen(Array.isArray(raw.seen) ? raw.seen : [], Date.now()),
 		known: Array.isArray(raw.known) ? raw.known.filter(topic => typeof topic === "string") : [],
-		ignoredInARow: count(raw.ignoredInARow),
-		checksToSkip: count(raw.checksToSkip),
 	};
 }
 
@@ -115,6 +107,9 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 	let inFlight: AbortController | undefined;
 	let unsubscribeKeys: (() => void) | undefined;
 	let warnedThisSession = false;
+	// Kept per running omp, not in the store: cards nobody answers in other panes must not quiet this one.
+	let ignoredInARow = 0;
+	let checksToSkip = 0;
 
 	const active = (ctx: ExtensionContext) => ctx.hasUI && ctx.mode === "tui" && ctx.agent.kind === "main";
 
@@ -234,9 +229,9 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			return;
 		}
 		// Cards ignored in a row thin out automatic checks; /ysk check always runs.
-		if (!manual && store.checksToSkip > 0) {
-			updateStore(current => ({ ...current, checksToSkip: Math.max(current.checksToSkip - 1, 0) }));
-			if (DEBUG) ctx.ui.notify(`${NAME}: skipped a check after ${store.ignoredInARow} ignored cards; ${store.checksToSkip - 1} more to skip.`, "info");
+		if (!manual && checksToSkip > 0) {
+			checksToSkip--;
+			if (DEBUG) ctx.ui.notify(`${NAME}: skipped a check after ${ignoredInARow} ignored cards; ${checksToSkip} more to skip.`, "info");
 			return;
 		}
 		const abort = new AbortController();
@@ -302,13 +297,11 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		}
 		// Any answer ends a run of ignored cards. Knowing, understanding or taking a topic to chat keeps it out of
 		// later checks.
-		const known = action === "know" || action === "understood" || action === "chat";
-		updateStore(store => ({
-			...store,
-			ignoredInARow: 0,
-			checksToSkip: 0,
-			known: known ? addKnown(store.known, finding.topic) : store.known,
-		}));
+		ignoredInARow = 0;
+		checksToSkip = 0;
+		if (action === "know" || action === "understood" || action === "chat") {
+			updateStore(store => ({ ...store, known: addKnown(store.known, finding.topic) }));
+		}
 		if (action === "learn" && finding.explanation) {
 			view = { kind: "explained", finding, text: finding.explanation };
 			return render(ctx);
@@ -361,10 +354,8 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			return;
 		}
 		clear(ctx);
-		updateStore(store => {
-			const ignoredInARow = store.ignoredInARow + 1;
-			return { ...store, ignoredInARow, checksToSkip: checksToSkipAfter(ignoredInARow) };
-		});
+		ignoredInARow++;
+		checksToSkip = checksToSkipAfter(ignoredInARow);
 	});
 
 	pi.on("turn_end", (event, ctx) => {
@@ -389,12 +380,12 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			if (arg === "check") return startCheck(ctx, true);
 			if (arg === "") {
 				const model = ctx.models.resolve(MODEL);
-				const store = readStore();
-				const skipping = store.checksToSkip
-					? `; ${store.ignoredInARow} cards ignored in a row, so the next ${store.checksToSkip === 1 ? "automatic check" : `${store.checksToSkip} automatic checks`} will not run`
+				const state = readStore().enabled ? "on" : "off";
+				const skipping = checksToSkip
+					? `; ${ignoredInARow} cards ignored in a row, so the next ${checksToSkip === 1 ? "automatic check" : `${checksToSkip} automatic checks`} will not run`
 					: "";
 				ctx.ui.notify(
-					`${NAME} is ${store.enabled ? "on" : "off"}; side model ${model ? `${model.provider}/${model.id}` : `missing (${MODEL})`}; card: ${view?.kind ?? "none"}${skipping}. Try /ysk check.`,
+					`${NAME} is ${state}; side model ${model ? `${model.provider}/${model.id}` : `missing (${MODEL})`}; card: ${view?.kind ?? "none"}${skipping}. Try /ysk check.`,
 					"info",
 				);
 				return;

@@ -106,7 +106,8 @@ modelRoles:
 6. If your prompts clear three cards in a row, the extension skips the next
    automatic check. Each next card that your prompts clear doubles the skip, to
    a maximum of 16 checks. An answer to a card stops the skips. `/ysk check`
-   always runs.
+   always runs. Each running omp keeps its own count, so cards in other panes
+   do not change it. Claude Code keeps one count for all sessions.
 7. `Knew this already`, `Understood`, and `Chat in main session` record the
    topic as known. The extension keeps the last 50 known topics, with no time
    limit. The model gets this list, and the extension drops these topics.
@@ -144,7 +145,7 @@ keys.
 
 | File | Holds |
 | :-- | :-- |
-| `~/.omp/agent/you-should-know.json` | On or off, the topics from the last three days, the known topics, and the count of ignored cards |
+| `~/.omp/agent/you-should-know.json` | On or off, the topics from the last three days, and the known topics |
 
 The extension logs each failed side request. omp sends a request again after a
 server error. A request fails if it gets no reply in 90 seconds. An automatic
