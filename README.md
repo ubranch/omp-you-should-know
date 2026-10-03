@@ -7,7 +7,7 @@
 <img src="https://img.shields.io/badge/typescript-1E1E22?style=flat-square" alt="TypeScript">
 <img src="https://img.shields.io/badge/omp_18.4-1E1E22?style=flat-square" alt="Tested on omp 18.4.9">
 <img src="https://img.shields.io/badge/0_runtime_deps-1E1E22?style=flat-square" alt="No runtime dependencies">
-<img src="https://img.shields.io/badge/18_tests-1E1E22?style=flat-square" alt="18 tests">
+<img src="https://img.shields.io/badge/20_tests-1E1E22?style=flat-square" alt="20 tests">
 <a href="#install"><img src="https://img.shields.io/badge/install-F97316?style=flat-square&labelColor=1E1E22" alt="Install"></a>
 </p>
 
@@ -56,10 +56,17 @@ once, at most 100 words for someone who has not been following:
   1: Understood   2: Chat in main session   0: Dismiss
 ```
 
-`2` puts a question about it in your prompt box for the main agent and leaves it
-there for you to edit or send. Three keys the card does not show rewrite the
+Bold words take the card's lavender. `2` quotes the card and its explanation in
+your prompt box, with an empty line under it for your question; nothing reaches
+the main agent until you send it. Three keys the card does not show rewrite the
 explanation: `3` more plainly, `4` down to one point, `5` with the real files
-and settings. While one is being written the card reads `✦ One moment…`.
+and settings. While one is being written the card reads `✦ One moment…`, with
+omp's shimmer running across it. If the first explanation cannot be written, the
+card says so in one line:
+
+```console
+✦ Couldn’t write that explanation · 0: OK
+```
 
 ## install
 
@@ -108,6 +115,7 @@ dialog is open. Typing and approval prompts keep their keys.
 | card | `1` learn more · `2` knew this already · `0` dismiss |
 | one moment… | `0` cancel |
 | explanation | `1` understood · `2` chat in main session · `0` dismiss · not drawn: `3` simpler · `4` shorter · `5` more detail |
+| couldn’t write | `0` ok |
 
 ## reference
 
@@ -131,8 +139,11 @@ dialog is open. Typing and approval prompts keep their keys.
 | :-- | :-- |
 | `~/.omp/agent/you-should-know.json` | on or off, and the topics shown in the last three days |
 
-Every failed side request is logged. An automatic check shows its error once per
-session; `/ysk check` and explanations always show theirs.
+Every failed side request is logged. omp retries server errors on its own, and a
+request still unanswered after 90 seconds fails. An automatic check shows its
+error once per session and `/ysk check` every time. A failed first explanation
+leaves the one-line card above; a failed rewrite shows its error and keeps the
+explanation already on screen.
 
 </details>
 
@@ -145,8 +156,8 @@ in omp talked to you.
 
 This brings that behaviour to omp: the same six-step cadence, the same card and
 choices, the same 100, 45 and 160 word limits. Claude Code is not open source,
-so the prompts here are written from scratch. Only the card's button labels
-match, so the two feel the same to use.
+so the prompts here are written from scratch. Only the text the card puts on
+screen matches, so the two feel the same to use.
 
 ## limits
 

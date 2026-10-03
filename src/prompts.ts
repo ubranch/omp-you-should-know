@@ -69,7 +69,14 @@ export function explainRequest(transcript: string, finding: Finding, depth: Dept
 	return `<session>\n${transcript}\n</session>\n\nThe thing to explain: ${finding.topic}${before}\n\n${DEPTH[depth]}`;
 }
 
-/** Draft placed in the composer for "Chat in main session"; the person edits or sends it. */
-export function chatDraft(finding: Finding): string {
-	return `You should know flagged this: "${finding.topic}". Walk me through it and tell me whether we should change anything.`;
+/**
+ * Draft placed in the prompt box for "Chat in main session": the card and its explanation quoted, then an empty
+ * line for the person's own question. It is never sent on their behalf.
+ */
+export function chatDraft(finding: Finding, explanation: string): string {
+	const quoted = `${finding.tag} · ${finding.topic}\n\n${explanation}`
+		.split("\n")
+		.map(line => (line === "" ? ">" : `> ${line}`))
+		.join("\n");
+	return `Here is a note offered by a side agent:\n\n${quoted}\n\n`;
 }

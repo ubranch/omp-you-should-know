@@ -10,7 +10,7 @@ import {
 	getMarkdownTheme,
 	logger,
 } from "@oh-my-pi/pi-coding-agent";
-import { Markdown, matchesKey, type TUI, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { Markdown, matchesKey, shimmerEnabled, shimmerText, type TUI, truncateToWidth } from "@oh-my-pi/pi-tui";
 import {
 	type Action,
 	actionFor,
@@ -19,6 +19,7 @@ import {
 	choiceLines,
 	type Depth,
 	EXPLAINED_CHOICES,
+	failedLine,
 	type Ink,
 	isCheckTurn,
 	isPrompt,
@@ -71,10 +72,12 @@ function updateStore(change: (store: Store) => Store): void {
 
 // Claude Code's `suggestion` colour, used for the star and the choice digits; the tag is plain ANSI dim like its dimColor.
 const SUGGESTION = { dark: "\x1b[38;2;177;185;249m", light: "\x1b[38;2;87;105;247m" };
+// omp's shimmer moves by wall clock; this is the redraw rate its own loader uses.
+const SHIMMER_FRAME_MS = 1000 / 30;
 
-function inkFor(isLight: boolean): Ink {
+function inkFor(suggestion: string): Ink {
 	return {
-		accent: text => `${isLight ? SUGGESTION.light : SUGGESTION.dark}${text}\x1b[39m`,
+		accent: text => `${suggestion}${text}\x1b[39m`,
 		dim: text => `\x1b[2m${text}\x1b[22m`,
 	};
 }
@@ -102,6 +105,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 	async function ask(ctx: ExtensionContext, system: string, request: string, signal: AbortSignal) {
 		const model = ctx.models.resolve(MODEL);
 		if (!model) throw new Error(`no model matches ${MODEL}; set modelRoles.smol in your omp config`);
+		const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
 		const reply = await completeSimple(
 			model,
 			{ systemPrompt: [system], messages: [{ role: "user", content: request, timestamp: Date.now() }] },
@@ -109,11 +113,12 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 				apiKey: ctx.modelRegistry.resolver(model, ctx.sessionManager.getSessionId()),
 				disableReasoning: true,
 				maxTokens: MAX_TOKENS,
-				signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+				signal: AbortSignal.any([signal, timeout]),
 			},
 		);
 		if (reply.stopReason === "error" || reply.stopReason === "aborted") {
-			throw new Error(`${model.provider}/${model.id}: ${reply.errorMessage ?? reply.stopReason}`);
+			const why = timeout.aborted ? `no reply within ${REQUEST_TIMEOUT_MS / 1000} s` : (reply.errorMessage ?? reply.stopReason);
+			throw new Error(`${model.provider}/${model.id}: ${why}`);
 		}
 		// A reply cut at MAX_TOKENS would show a half sentence as if it were the whole point.
 		if (reply.stopReason === "length") throw new Error(`${model.provider}/${model.id}: reply cut off at ${MAX_TOKENS} tokens`);
@@ -146,25 +151,40 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			WIDGET,
 			(ui, theme) => {
 				tui = ui;
-				const ink = inkFor(theme.isLight);
+				const suggestion = theme.isLight ? SUGGESTION.light : SUGGESTION.dark;
+				const ink = inkFor(suggestion);
 				const { tag, topic } = current.finding;
-				// Explanation text goes through omp's Markdown renderer; sketches are shown as written, without fences.
+				const shimmer = current.kind === "explaining" && shimmerEnabled();
+				// omp disposes a widget when it is replaced or removed, which stops the redraws.
+				const shimmerTimer = shimmer ? setInterval(() => ui.requestRender(), SHIMMER_FRAME_MS) : undefined;
+				// Explanation text goes through omp's Markdown renderer, with bold words in the card's colour;
+				// sketches keep their layout, without fences, in omp's code block colour.
+				const markdown = getMarkdownTheme();
+				const markdownTheme = { ...markdown, bold: (text: string) => ink.accent(markdown.bold(text)) };
 				const parts =
 					current.kind === "explained"
 						? splitSketches(current.text).map(part => ({
 								...part,
-								md: part.sketch ? undefined : new Markdown(part.text, 0, 0, getMarkdownTheme()),
+								md: part.sketch ? undefined : new Markdown(part.text, 0, 0, markdownTheme),
 							}))
 						: [];
 				return {
 					render(width: number): string[] {
-						if (current.kind === "explaining") return ["", `${ink.accent(STAR)} ${ink.dim("One moment…")}`];
+						if (current.kind === "failed") return ["", failedLine(ink)];
+						if (current.kind === "explaining") {
+							const label = shimmer
+								? shimmerText("One moment…", theme, { low: "dim", mid: "muted", high: { ansi: suggestion } })
+								: ink.dim("One moment…");
+							return ["", `${ink.accent(STAR)} ${label}`];
+						}
 						const lines = ["", ...leadLines(tag, topic, width, ink)];
 						if (current.kind === "explained") {
 							lines.push("");
 							const inner = Math.max(width - 2, 1);
 							for (const part of parts) {
-								const body = part.md ? part.md.render(inner) : part.text.split("\n").map(l => truncateToWidth(l, inner));
+								const body = part.md
+									? part.md.render(inner)
+									: part.text.split("\n").map(l => markdownTheme.codeBlock(truncateToWidth(l, inner)));
 								lines.push(...body.map(l => `  ${l}`), "");
 							}
 						}
@@ -173,6 +193,9 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 					},
 					invalidate() {
 						for (const part of parts) part.md?.invalidate();
+					},
+					dispose() {
+						clearInterval(shimmerTimer);
 					},
 				};
 			},
@@ -232,8 +255,14 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		})()
 			.catch(error => {
 				if (abort.signal.aborted) return;
-				report(ctx, "explanation", error, true);
-				view = previous ? { kind: "explained", finding, text: previous } : { kind: "offer", finding, promptsSince: 0 };
+				// A failed rewrite keeps the explanation already on screen; a failed first one leaves the failed card.
+				if (previous) {
+					report(ctx, "explanation", error, true);
+					view = { kind: "explained", finding, text: previous };
+				} else {
+					logger.warn(`${NAME}: explanation failed`, { error: errorText(error) });
+					view = { kind: "failed", finding };
+				}
 				render(ctx);
 			})
 			.finally(() => {
@@ -249,21 +278,22 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		}
 		if (action === "learn") return explain(ctx, "first");
 		if (action === "simpler" || action === "shorter" || action === "more") return explain(ctx, action);
-		if (action === "chat") {
+		if (action === "chat" && view.kind === "explained") {
 			if (ctx.ui.getEditorText().trim()) {
-				ctx.ui.notify(`${NAME}: clear the prompt box first, then choose Chat again.`, "warning");
+				ctx.ui.notify("Your prompt box has text in it. Send or clear it, then press 2 again.", "warning");
 				return;
 			}
-			ctx.ui.setEditorText(chatDraft(view.finding));
+			ctx.ui.setEditorText(chatDraft(view.finding, view.text));
 		}
 		clear(ctx);
 	}
 
-	pi.on("session_start", (_event, ctx) => {
-		if (!active(ctx)) return;
+	/**
+	 * Digits are taken only while the card is up, the main prompt box has focus and is empty,
+	 * and no dialog is open, so typing and approval prompts keep their keys.
+	 */
+	function listenForDigits(ctx: ExtensionContext) {
 		unsubscribeKeys?.();
-		// Digits are taken only while the card is up, the main prompt box has focus and is empty,
-		// and no dialog is open, so typing and approval prompts keep their keys.
 		unsubscribeKeys = ctx.ui.onTerminalInput(data => {
 			if (!view || !tui) return undefined;
 			const digit = DIGITS.find(d => matchesKey(data, d));
@@ -273,10 +303,16 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			act(action, ctx);
 			return { consume: true };
 		});
+	}
+
+	pi.on("session_start", (_event, ctx) => {
+		if (active(ctx)) listenForDigits(ctx);
 	});
 
+	// omp drops every extension key listener and widget when it switches sessions (/new, /resume, /fork).
 	pi.on("session_switch", (_event, ctx) => {
 		if (view) clear(ctx);
+		if (active(ctx)) listenForDigits(ctx);
 	});
 
 	pi.on("session_shutdown", () => {

@@ -5,6 +5,7 @@ import {
 	choiceLines,
 	DEFAULT_TAG,
 	EXPLAINED_CHOICES,
+	failedLine,
 	HEADS_UP,
 	type Ink,
 	isCheckTurn,
@@ -19,6 +20,7 @@ import {
 	type TranscriptEntry,
 	wasSeen,
 } from "../src/core.ts";
+import { chatDraft } from "../src/prompts.ts";
 
 const plain: Ink = { accent: s => s, dim: s => s };
 
@@ -157,6 +159,12 @@ describe("card layout matches Claude Code's terminal card", () => {
 		expect(choiceLines(OFFER_CHOICES, 30, plain)).toEqual(["  1: Learn more", "  2: Knew this already", "  0: Dismiss"]);
 	});
 
+	test("a failed first explanation leaves one line with its only choice", () => {
+		expect(failedLine(plain)).toBe("✦ Couldn’t write that explanation · 0: OK");
+		expect(actionFor("failed", "0")).toBe("dismiss");
+		expect(actionFor("failed", "1")).toBeUndefined();
+	});
+
 	test("sketches lose their fences", () => {
 		expect(splitSketches("**T**\n\nText.\n```text\na\n b\n```\nAfter.")).toEqual([
 			{ sketch: false, text: "**T**\n\nText." },
@@ -164,6 +172,12 @@ describe("card layout matches Claude Code's terminal card", () => {
 			{ sketch: false, text: "After." },
 		]);
 	});
+});
+
+test("chat draft quotes the card and its explanation, then leaves a line to type on", () => {
+	expect(chatDraft({ topic: "Two tests skipped.", tag: HEADS_UP }, "**Tests skipped**\n\nBody.")).toBe(
+		"Here is a note offered by a side agent:\n\n> Heads up · Two tests skipped.\n>\n> **Tests skipped**\n>\n> Body.\n\n",
+	);
 });
 
 test("slash commands and shell lines are not prompts", () => {

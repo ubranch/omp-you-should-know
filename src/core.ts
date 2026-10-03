@@ -189,7 +189,8 @@ export type Depth = "first" | "simpler" | "shorter" | "more";
 export type View =
 	| { kind: "offer"; finding: Finding; promptsSince: number }
 	| { kind: "explaining"; finding: Finding }
-	| { kind: "explained"; finding: Finding; text: string };
+	| { kind: "explained"; finding: Finding; text: string }
+	| { kind: "failed"; finding: Finding };
 
 export type Action = "learn" | "know" | "dismiss" | "understood" | "chat" | Exclude<Depth, "first">;
 
@@ -203,7 +204,10 @@ const EXPLAINED_KEYS: Record<string, Action> = {
 	"0": "dismiss",
 };
 
-/** The action a digit maps to in the current card state, if any. 3, 4 and 5 work on an explanation but are not drawn. */
+/**
+ * The action a digit maps to in the current card state, if any. 3, 4 and 5 work on an explanation but are not drawn.
+ * While an explanation is being written, and on the failed card, only 0 does anything.
+ */
 export function actionFor(view: View["kind"], digit: string): Action | undefined {
 	if (view === "offer") return OFFER_KEYS[digit];
 	if (view === "explained") return EXPLAINED_KEYS[digit];
@@ -267,6 +271,11 @@ export function choiceLines(choices: readonly Choice[], width: number, ink: Ink)
 	}
 	if (line) lines.push(line);
 	return lines;
+}
+
+/** The card left when the first explanation could not be written; 0 closes it. */
+export function failedLine(ink: Ink): string {
+	return `${ink.accent(STAR)} Couldn’t write that explanation ${ink.dim("·")} ${ink.accent("0:")} OK`;
 }
 
 /** Splits an explanation into Markdown text and fenced sketches; sketches are shown without their fences. */
