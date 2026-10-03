@@ -10,19 +10,25 @@ import {
 	getMarkdownTheme,
 	logger,
 } from "@oh-my-pi/pi-coding-agent";
-import { Container, Markdown, matchesKey, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { Markdown, matchesKey, type TUI, truncateToWidth } from "@oh-my-pi/pi-tui";
 import {
 	type Action,
 	actionFor,
 	buildTranscript,
 	CLEAR_AFTER_PROMPTS,
+	choiceLines,
 	type Depth,
 	EXPLAINED_CHOICES,
+	type Ink,
 	isCheckTurn,
+	isPrompt,
+	leadLines,
 	OFFER_CHOICES,
 	parseCheckReply,
 	pruneSeen,
 	type SeenTopic,
+	STAR,
+	splitSketches,
 	type View,
 	wasSeen,
 } from "./core.ts";
@@ -34,9 +40,9 @@ const WIDGET = "you-should-know";
 const DIGITS = ["0", "1", "2", "3", "4", "5"] as const;
 const MAX_TRANSCRIPT_CHARS = 48_000;
 const REQUEST_TIMEOUT_MS = 90_000;
-// Headroom over the 25- and 160-word answers: some fast models still spend output tokens on reasoning.
-const CHECK_MAX_TOKENS = 1_000;
-const EXPLAIN_MAX_TOKENS = 3_000;
+// Headroom over the answers (a topic plus a 100-word explanation; 160 words at most): some fast models still
+// spend output tokens on reasoning.
+const MAX_TOKENS = 3_000;
 const STORE_FILE = path.join(getAgentDir(), "you-should-know.json");
 /** OMP_YSK_DEBUG=1 also reports automatic checks that found nothing. */
 const DEBUG = process.env.OMP_YSK_DEBUG === "1";
@@ -63,6 +69,16 @@ function updateStore(change: (store: Store) => Store): void {
 	fs.writeFileSync(STORE_FILE, `${JSON.stringify(change(readStore()), null, "\t")}\n`);
 }
 
+// Claude Code's `suggestion` colour, used for the star and the choice digits; the tag is plain ANSI dim like its dimColor.
+const SUGGESTION = { dark: "\x1b[38;2;177;185;249m", light: "\x1b[38;2;87;105;247m" };
+
+function inkFor(isLight: boolean): Ink {
+	return {
+		accent: text => `${isLight ? SUGGESTION.light : SUGGESTION.dark}${text}\x1b[39m`,
+		dim: text => `\x1b[2m${text}\x1b[22m`,
+	};
+}
+
 /** The main prompt box is the only focusable component with custom key handlers; dialogs never are. */
 function isPromptBox(component: unknown): boolean {
 	return typeof (component as { setCustomKeyHandler?: unknown } | null)?.setCustomKeyHandler === "function";
@@ -83,7 +99,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	const active = (ctx: ExtensionContext) => ctx.hasUI && ctx.mode === "tui" && ctx.agent.kind === "main";
 
-	async function ask(ctx: ExtensionContext, system: string, request: string, maxTokens: number, signal: AbortSignal) {
+	async function ask(ctx: ExtensionContext, system: string, request: string, signal: AbortSignal) {
 		const model = ctx.models.resolve(MODEL);
 		if (!model) throw new Error(`no model matches ${MODEL}; set modelRoles.smol in your omp config`);
 		const reply = await completeSimple(
@@ -92,15 +108,15 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			{
 				apiKey: ctx.modelRegistry.resolver(model, ctx.sessionManager.getSessionId()),
 				disableReasoning: true,
-				maxTokens,
+				maxTokens: MAX_TOKENS,
 				signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
 			},
 		);
 		if (reply.stopReason === "error" || reply.stopReason === "aborted") {
 			throw new Error(`${model.provider}/${model.id}: ${reply.errorMessage ?? reply.stopReason}`);
 		}
-		// A reply cut at maxTokens would show a half sentence as if it were the whole point.
-		if (reply.stopReason === "length") throw new Error(`${model.provider}/${model.id}: reply cut off at ${maxTokens} tokens`);
+		// A reply cut at MAX_TOKENS would show a half sentence as if it were the whole point.
+		if (reply.stopReason === "length") throw new Error(`${model.provider}/${model.id}: reply cut off at ${MAX_TOKENS} tokens`);
 		return reply.content
 			.filter(part => part.type === "text")
 			.map(part => part.text)
@@ -130,17 +146,35 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			WIDGET,
 			(ui, theme) => {
 				tui = ui;
-				const card = new Container();
-				if (current.kind === "explained") {
-					card.addChild(new Markdown(current.text, 1, 0, getMarkdownTheme()));
-					card.addChild(new Text(theme.fg("dim", EXPLAINED_CHOICES), 1, 0));
-				} else {
-					const { tag, topic } = current.finding;
-					card.addChild(new Text(`${theme.bold(theme.fg("accent", tag))} ${theme.fg("dim", "·")} ${topic}`, 1, 0));
-					const choices = current.kind === "offer" ? OFFER_CHOICES : "Explaining…   0: Dismiss";
-					card.addChild(new Text(theme.fg("dim", choices), 1, 0));
-				}
-				return card;
+				const ink = inkFor(theme.isLight);
+				const { tag, topic } = current.finding;
+				// Explanation text goes through omp's Markdown renderer; sketches are shown as written, without fences.
+				const parts =
+					current.kind === "explained"
+						? splitSketches(current.text).map(part => ({
+								...part,
+								md: part.sketch ? undefined : new Markdown(part.text, 0, 0, getMarkdownTheme()),
+							}))
+						: [];
+				return {
+					render(width: number): string[] {
+						if (current.kind === "explaining") return ["", `${ink.accent(STAR)} ${ink.dim("One moment…")}`];
+						const lines = ["", ...leadLines(tag, topic, width, ink)];
+						if (current.kind === "explained") {
+							lines.push("");
+							const inner = Math.max(width - 2, 1);
+							for (const part of parts) {
+								const body = part.md ? part.md.render(inner) : part.text.split("\n").map(l => truncateToWidth(l, inner));
+								lines.push(...body.map(l => `  ${l}`), "");
+							}
+						}
+						lines.push(...choiceLines(current.kind === "offer" ? OFFER_CHOICES : EXPLAINED_CHOICES, width, ink));
+						return lines;
+					},
+					invalidate() {
+						for (const part of parts) part.md?.invalidate();
+					},
+				};
 			},
 			{ placement: "aboveEditor" },
 		);
@@ -164,7 +198,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		if (manual) ctx.ui.notify(`${NAME}: checking the session…`, "info");
 		void (async () => {
 			const { seen } = readStore();
-			const finding = parseCheckReply(await ask(ctx, CHECK_SYSTEM, checkRequest(transcript(ctx), seen), CHECK_MAX_TOKENS, abort.signal));
+			const finding = parseCheckReply(await ask(ctx, CHECK_SYSTEM, checkRequest(transcript(ctx), seen), abort.signal));
 			if (abort.signal.aborted || view) return;
 			if (!finding || wasSeen(seen, finding.topic)) {
 				if (manual || DEBUG) ctx.ui.notify(`${NAME}: nothing worth flagging right now.`, "info");
@@ -191,7 +225,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		view = { kind: "explaining", finding };
 		render(ctx);
 		void (async () => {
-			const text = await ask(ctx, EXPLAIN_SYSTEM, explainRequest(transcript(ctx), finding, depth, previous), EXPLAIN_MAX_TOKENS, abort.signal);
+			const text = await ask(ctx, EXPLAIN_SYSTEM, explainRequest(transcript(ctx), finding, depth, previous), abort.signal);
 			if (abort.signal.aborted) return;
 			view = { kind: "explained", finding, text };
 			render(ctx);
@@ -209,6 +243,10 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	function act(action: Action, ctx: ExtensionContext) {
 		if (!view) return;
+		if (action === "learn" && view.finding.explanation) {
+			view = { kind: "explained", finding: view.finding, text: view.finding.explanation };
+			return render(ctx);
+		}
 		if (action === "learn") return explain(ctx, "first");
 		if (action === "simpler" || action === "shorter" || action === "more") return explain(ctx, action);
 		if (action === "chat") {
@@ -248,7 +286,8 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 	});
 
 	pi.on("input", (event, ctx) => {
-		if (event.source !== "interactive" || view?.kind !== "offer") return;
+		// omp runs input handlers for slash commands too; only prompts to the agent count.
+		if (event.source !== "interactive" || !isPrompt(event.text) || view?.kind !== "offer") return;
 		const promptsSince = view.promptsSince + 1;
 		if (promptsSince >= CLEAR_AFTER_PROMPTS) clear(ctx);
 		else view = { ...view, promptsSince };

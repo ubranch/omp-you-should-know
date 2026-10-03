@@ -1,13 +1,13 @@
 <div align="center">
 
 <img src="./assets/readme/hero.svg" width="100%"
-     alt="you should know, an omp extension. A side agent reads the session and puts one card above the prompt when something matters. The card shown is real output: Risk, two payment tests were skipped because DATABASE_URL was not set, despite the agent reporting the test suite as green.">
+     alt="you should know, an omp extension. A side agent reads the session and puts one card above the prompt when something matters, laid out like Claude Code's. The card shown is real output: Heads up, two payment tests were silently skipped because DATABASE_URL is not set, leaving critical transaction logic unverified.">
 
 <p>
 <img src="https://img.shields.io/badge/typescript-1E1E22?style=flat-square" alt="TypeScript">
 <img src="https://img.shields.io/badge/omp_18.4-1E1E22?style=flat-square" alt="Tested on omp 18.4.9">
 <img src="https://img.shields.io/badge/0_runtime_deps-1E1E22?style=flat-square" alt="No runtime dependencies">
-<img src="https://img.shields.io/badge/13_tests-1E1E22?style=flat-square" alt="13 tests">
+<img src="https://img.shields.io/badge/18_tests-1E1E22?style=flat-square" alt="18 tests">
 <a href="#install"><img src="https://img.shields.io/badge/install-F97316?style=flat-square&labelColor=1E1E22" alt="Install"></a>
 </p>
 
@@ -22,38 +22,44 @@ prompt.
 ## look
 
 ```console
- Tests skipped · Two payment tests were skipped because DATABASE_URL was not set,
- despite the agent reporting the run as green.
- 1: Learn more   2: Know this already   0: Dismiss
+✦ Heads up · Two payment tests were silently skipped because DATABASE_URL is not
+  set, leaving critical transaction logic unverified.
+  1: Learn more   2: Knew this already   0: Dismiss
 ────────────────────────────────────────────────────────────────────────────────
 ❯
 ```
 
+The same card as Claude Code's, cell for cell: the `✦` in its lavender, the tag
+dimmed, every wrapped line and the choices under the text. The tag is always
+`You should know` or `Heads up`.
+
 In that session the agent had run `sh ./test.sh`, seen
 `3 passed, 2 skipped, 0 failed`, and answered "Yes" when asked whether the tests
-were green. A card on the same point had already come up on its own, at the
-sixth step of a later run.
+were green.
 
-`1` asks the same side model to explain it in at most 100 words, for someone who
-has not been following:
+The explanation is written in the same reply as the card, so `1` opens it at
+once, at most 100 words for someone who has not been following:
 
 ```text
- Payment tests were skipped
- When automated checks run, they need a database address to test money
- transactions. Because that address was missing, the suite bypassed checks like
- preventing double charges rather than verifying them.
- The agent reported the test run as green because 0 failed.
- In reality, only 3 passed while 2 were skipped.
-   Ran:     [pass] [pass] [pass]
-   Skipped: [DATABASE_URL unset] [DATABASE_URL unset]
- You risk releasing untested payment safeguards, so you must decide whether to
- set DATABASE_URL and run ./test.sh again before shipping.
- 1: Understood   2: Chat in main session   3: Simpler   4: Shorter   5: More detail   0: Dismiss
+  Payment test suite skipped
+
+  Automated tests can silently skip critical checks when required configuration
+  is missing. Running ./test.sh skipped both payment refund path and payment
+  double-charge guard.
+
+  Expected: all 5 tests run and validate payments.
+  Actual: 3 passed, 2 skipped due to unset DATABASE_URL.
+
+  You risk shipping unverified refund and billing safeguards unless you
+  configure the database environment variable and rerun the suite.
+
+  1: Understood   2: Chat in main session   0: Dismiss
 ```
 
-`3` says it more plainly, `4` cuts it to one point, `5` names the real files and
-settings. `2` puts a question about it in your prompt box for the main agent and
-leaves it there for you to edit or send.
+`2` puts a question about it in your prompt box for the main agent and leaves it
+there for you to edit or send. Three keys the card does not show rewrite the
+explanation: `3` more plainly, `4` down to one point, `5` with the real files
+and settings. While one is being written the card reads `✦ One moment…`.
 
 ## install
 
@@ -82,15 +88,15 @@ modelRoles:
 1. After steps 6, 12, 18 … of an agent run, it sends the session to the `smol`
    model: your first request, then the newest steps, tool calls and results,
    from the last compaction on, trimmed to 48,000 characters.
-2. The model answers `learn: none`, or one sentence of at most 25 words and a
-   one-to-three-word tag such as `Risk` or `Cost`. Most checks end at `none`.
+2. The model answers `learn: none`, or one or two sentences of about 20 words,
+   the tag, and the explanation. Most checks end at `none`.
 3. A sentence becomes the card. It never starts an agent turn and never writes
    to the session. Nothing reaches the main model unless you send the drafted
    question yourself.
 4. Shown topics are kept for three days and passed back to the model, so the
    same point is not raised twice.
-5. An unanswered card clears after two of your prompts. An opened explanation
-   stays until you close it.
+5. An unanswered card clears after two of your prompts; slash commands and `!`
+   shell lines do not count. An opened explanation stays until you close it.
 
 ## keys
 
@@ -99,9 +105,9 @@ dialog is open. Typing and approval prompts keep their keys.
 
 | card | keys |
 | :-- | :-- |
-| heads-up | `1` learn more · `2` know this already · `0` dismiss |
-| explaining | `0` cancel |
-| explanation | `1` understood · `2` chat in main session · `3` simpler · `4` shorter · `5` more detail · `0` dismiss |
+| card | `1` learn more · `2` knew this already · `0` dismiss |
+| one moment… | `0` cancel |
+| explanation | `1` understood · `2` chat in main session · `0` dismiss · not drawn: `3` simpler · `4` shorter · `5` more detail |
 
 ## reference
 

@@ -2,15 +2,25 @@ import { describe, expect, test } from "bun:test";
 import {
 	actionFor,
 	buildTranscript,
+	choiceLines,
 	DEFAULT_TAG,
+	EXPLAINED_CHOICES,
+	HEADS_UP,
+	type Ink,
 	isCheckTurn,
+	isPrompt,
+	leadLines,
+	OFFER_CHOICES,
 	parseCheckReply,
 	pruneSeen,
 	SEEN_KEEP_MS,
 	SEEN_MAX,
+	splitSketches,
 	type TranscriptEntry,
 	wasSeen,
 } from "../src/core.ts";
+
+const plain: Ink = { accent: s => s, dim: s => s };
 
 test("checks after every sixth step of a run", () => {
 	const fired = Array.from({ length: 19 }, (_, i) => i).filter(isCheckTurn);
@@ -23,28 +33,34 @@ describe("parseCheckReply", () => {
 		expect(parseCheckReply("**learn:** None.")).toBeUndefined();
 	});
 
-	test("reads topic and tag, stripping markdown and quotes", () => {
-		expect(parseCheckReply('**learn:** "The agent deleted the old migration."\ntag: `Risk`')).toEqual({
+	test("reads topic, tag and explanation, stripping markdown and quotes", () => {
+		expect(
+			parseCheckReply('**learn:** "The agent deleted the old migration."\ntag: `Heads up`\nexplain:\n**Old migration gone**\n\nBody.'),
+		).toEqual({
 			topic: "The agent deleted the old migration.",
-			tag: "Risk",
+			tag: HEADS_UP,
+			explanation: "**Old migration gone**\n\nBody.",
 		});
 	});
 
-	test("keeps underscores in identifiers", () => {
+	test("only Heads up and You should know are tags; anything else is the default", () => {
+		expect(parseCheckReply("learn: x.\ntag: heads-up!")?.tag).toBe(HEADS_UP);
+		expect(parseCheckReply("learn: x.\ntag: Risk")?.tag).toBe(DEFAULT_TAG);
+		expect(parseCheckReply("learn: x.")?.tag).toBe(DEFAULT_TAG);
+	});
+
+	test("keeps underscores in identifiers and ends the topic with a period", () => {
 		expect(parseCheckReply("learn: Two tests skipped because DATABASE_URL is unset")?.topic).toBe(
-			"Two tests skipped because DATABASE_URL is unset",
+			"Two tests skipped because DATABASE_URL is unset.",
 		);
 	});
 
 	test("joins a topic that wraps onto the next line", () => {
-		expect(parseCheckReply("learn: Two payment tests were skipped, even though\nthe agent called the run green.\ntag: Risk")).toEqual({
+		expect(parseCheckReply("learn: Two payment tests were skipped, even though\nthe agent called the run green.\ntag: Heads up")).toEqual({
 			topic: "Two payment tests were skipped, even though the agent called the run green.",
-			tag: "Risk",
+			tag: HEADS_UP,
+			explanation: undefined,
 		});
-	});
-
-	test("tag defaults to Heads up", () => {
-		expect(parseCheckReply("learn: Tests were skipped")?.tag).toBe(DEFAULT_TAG);
 	});
 
 	test("a reply without a learn line is an error, not silence", () => {
@@ -116,4 +132,43 @@ test("digits map to the current card's choices", () => {
 	expect(actionFor("explained", "5")).toBe("more");
 	expect(actionFor("explaining", "1")).toBeUndefined();
 	expect(actionFor("explaining", "0")).toBe("dismiss");
+});
+
+describe("card layout matches Claude Code's terminal card", () => {
+	const topic =
+		"The new omp extension now runs in every omp session, including herdr fleet worker panes where nobody reads the cards.";
+
+	test("star column, dim tag, hanging indent", () => {
+		expect(leadLines(HEADS_UP, topic, 120, plain)).toEqual([
+			"✦ Heads up · The new omp extension now runs in every omp session, including herdr fleet worker panes where nobody reads",
+			"  the cards.",
+		]);
+	});
+
+	test("colours wrap the star, the tag and the digits only", () => {
+		const ink: Ink = { accent: s => `<a>${s}</a>`, dim: s => `<d>${s}</d>` };
+		expect(leadLines(HEADS_UP, "Short.", 80, ink)).toEqual(["<a>✦</a> <d>Heads up ·</d> Short."]);
+		expect(choiceLines(OFFER_CHOICES, 80, ink)).toEqual(["  <a>1:</a> Learn more   <a>2:</a> Knew this already   <a>0:</a> Dismiss"]);
+	});
+
+	test("choices sit under the text, three cells apart, and wrap when narrow", () => {
+		expect(choiceLines(OFFER_CHOICES, 120, plain)).toEqual(["  1: Learn more   2: Knew this already   0: Dismiss"]);
+		expect(choiceLines(EXPLAINED_CHOICES, 120, plain)).toEqual(["  1: Understood   2: Chat in main session   0: Dismiss"]);
+		expect(choiceLines(OFFER_CHOICES, 30, plain)).toEqual(["  1: Learn more", "  2: Knew this already", "  0: Dismiss"]);
+	});
+
+	test("sketches lose their fences", () => {
+		expect(splitSketches("**T**\n\nText.\n```text\na\n b\n```\nAfter.")).toEqual([
+			{ sketch: false, text: "**T**\n\nText." },
+			{ sketch: true, text: "a\n b" },
+			{ sketch: false, text: "After." },
+		]);
+	});
+});
+
+test("slash commands and shell lines are not prompts", () => {
+	expect(isPrompt("/ysk")).toBe(false);
+	expect(isPrompt("  /ysk 1")).toBe(false);
+	expect(isPrompt("!ls")).toBe(false);
+	expect(isPrompt("fix the login")).toBe(true);
 });

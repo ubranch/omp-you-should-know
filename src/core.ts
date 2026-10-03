@@ -1,23 +1,32 @@
-/** Pure logic: cadence, reply parsing, topic memory, transcript building, key mapping. No omp runtime imports. */
+/** Pure logic: cadence, reply parsing, topic memory, transcript building, keys and card layout. */
+import { visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 
 export const CHECK_EVERY = 6;
 export const CLEAR_AFTER_PROMPTS = 2;
 export const SEEN_KEEP_MS = 3 * 24 * 60 * 60 * 1000;
 export const SEEN_MAX = 50;
-export const DEFAULT_TAG = "Heads up";
+/** The only two tags a card carries, as in Claude Code; anything that is not "heads up" becomes the default. */
+export const DEFAULT_TAG = "You should know";
+export const HEADS_UP = "Heads up";
 
 /** turnIndex is 0-based and resets every agent run, so this fires after steps 6, 12, 18… of one run. */
 export function isCheckTurn(turnIndex: number): boolean {
 	return (turnIndex + 1) % CHECK_EVERY === 0;
 }
 
+/** Slash commands and `!` shell lines are submitted through the prompt box but are not prompts to the agent. */
+export function isPrompt(text: string): boolean {
+	return !/^[/!]/.test(text.trim());
+}
+
 export interface Finding {
 	topic: string;
 	tag: string;
+	/** Written in the same reply as the topic, so "Learn more" opens without waiting. */
+	explanation?: string;
 }
 
-const MAX_TOPIC_CHARS = 200;
-const MAX_TAG_CHARS = 24;
+const MAX_TOPIC_CHARS = 240;
 
 // Strips bold and code marks only; underscores stay because identifiers like DATABASE_URL use them.
 function cleanLine(text: string): string {
@@ -29,31 +38,42 @@ function cleanLine(text: string): string {
 }
 
 /**
- * `learn: none` → undefined. `learn: <topic>` plus optional `tag: <tag>` → a finding. A topic that wraps
- * onto following lines is joined back. Anything else throws.
+ * `learn: none` → undefined. Otherwise `learn: <topic>`, optional `tag:`, optional `explain:` followed by the
+ * explanation → a finding. A topic that wraps onto following lines is joined back. No `learn:` line throws.
  */
 export function parseCheckReply(reply: string): Finding | undefined {
+	const lines = reply.split(/\r?\n/);
 	let topic: string | undefined;
 	let tag: string | undefined;
+	let explanation: string | undefined;
 	let inTopic = false;
-	for (const raw of reply.split(/\r?\n/)) {
+	for (const [i, raw] of lines.entries()) {
 		const line = raw.replace(/[*`]/g, "");
-		const match = /^\s*(learn|tag)\s*:\s*(.*)$/i.exec(line);
+		const match = /^\s*(learn|tag|explain)\s*:\s*(.*)$/i.exec(line);
 		if (!match) {
 			if (inTopic && line.trim()) topic = `${topic} ${line}`;
 			else inTopic = false;
 			continue;
 		}
-		inTopic = match[1]?.toLowerCase() === "learn" && topic === undefined;
+		const field = match[1]?.toLowerCase();
+		inTopic = field === "learn" && topic === undefined;
 		if (inTopic) topic = match[2] ?? "";
-		else if (match[1]?.toLowerCase() === "tag") tag ??= cleanLine(match[2] ?? "");
+		else if (field === "tag") tag ??= cleanLine(match[2] ?? "");
+		else if (field === "explain") {
+			// The explanation is everything after `explain:`, raw, because it is Markdown.
+			const sameLine = raw.replace(/^\s*\**explain\**\s*:\s*/i, "");
+			explanation = [sameLine, ...lines.slice(i + 1)].join("\n").trim() || undefined;
+			break;
+		}
 	}
 	topic = topic === undefined ? undefined : cleanLine(topic);
 	if (topic === undefined) throw new Error(`side agent reply has no "learn:" line: ${reply.slice(0, 200)}`);
 	if (topic === "" || /^none\b/i.test(topic)) return undefined;
+	if (topic.length > MAX_TOPIC_CHARS) throw new Error(`side agent topic is over ${MAX_TOPIC_CHARS} characters`);
 	return {
-		topic: topic.slice(0, MAX_TOPIC_CHARS),
-		tag: tag ? tag.slice(0, MAX_TAG_CHARS) : DEFAULT_TAG,
+		topic: /[.!?]$/.test(topic) ? topic : `${topic}.`,
+		tag: tag && /^\W*heads[\s-]*up\W*$/i.test(tag) ? HEADS_UP : DEFAULT_TAG,
+		explanation,
 	};
 }
 
@@ -183,12 +203,76 @@ const EXPLAINED_KEYS: Record<string, Action> = {
 	"0": "dismiss",
 };
 
-export const OFFER_CHOICES = "1: Learn more   2: Know this already   0: Dismiss";
-export const EXPLAINED_CHOICES = "1: Understood   2: Chat in main session   3: Simpler   4: Shorter   5: More detail   0: Dismiss";
-
-/** The action a digit maps to in the current card state, if any. */
+/** The action a digit maps to in the current card state, if any. 3, 4 and 5 work on an explanation but are not drawn. */
 export function actionFor(view: View["kind"], digit: string): Action | undefined {
 	if (view === "offer") return OFFER_KEYS[digit];
 	if (view === "explained") return EXPLAINED_KEYS[digit];
 	return digit === "0" ? "dismiss" : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Card layout, cell for cell with Claude Code's terminal card:
+//   ✦ Heads up · The sentence, wrapped with every
+//     following line under the text.
+//     1: Learn more   2: Knew this already   0: Dismiss
+// ---------------------------------------------------------------------------
+
+export const STAR = "✦";
+const STAR_CELLS = 2;
+const CHOICE_GAP = 3;
+
+export interface Choice {
+	key: string;
+	label: string;
+}
+
+export const OFFER_CHOICES: readonly Choice[] = [
+	{ key: "1", label: "Learn more" },
+	{ key: "2", label: "Knew this already" },
+	{ key: "0", label: "Dismiss" },
+];
+export const EXPLAINED_CHOICES: readonly Choice[] = [
+	{ key: "1", label: "Understood" },
+	{ key: "2", label: "Chat in main session" },
+	{ key: "0", label: "Dismiss" },
+];
+
+/** Colours applied after layout, so widths are counted on plain text. */
+export interface Ink {
+	accent(text: string): string;
+	dim(text: string): string;
+}
+
+/** `✦ tag · topic`, wrapped inside the star column's indent. */
+export function leadLines(tag: string, topic: string, width: number, ink: Ink): string[] {
+	return wrapTextWithAnsi(`${ink.dim(`${tag} ·`)} ${topic}`, Math.max(width - STAR_CELLS, 1)).map(
+		(row, i) => `${i === 0 ? `${ink.accent(STAR)} ` : "  "}${row}`,
+	);
+}
+
+/** The choice row, indented under the text, three cells between choices, wrapping when it does not fit. */
+export function choiceLines(choices: readonly Choice[], width: number, ink: Ink): string[] {
+	const lines: string[] = [];
+	let line = "";
+	let used = 0;
+	for (const { key, label } of choices) {
+		const cells = visibleWidth(`${key}: ${label}`);
+		if (used > 0 && STAR_CELLS + used + CHOICE_GAP + cells > width) {
+			lines.push(line);
+			line = "";
+			used = 0;
+		}
+		line += `${used > 0 ? " ".repeat(CHOICE_GAP) : " ".repeat(STAR_CELLS)}${ink.accent(`${key}:`)} ${label}`;
+		used += (used > 0 ? CHOICE_GAP : 0) + cells;
+	}
+	if (line) lines.push(line);
+	return lines;
+}
+
+/** Splits an explanation into Markdown text and fenced sketches; sketches are shown without their fences. */
+export function splitSketches(text: string): Array<{ sketch: boolean; text: string }> {
+	return text
+		.split(/^```[^\n]*$/m)
+		.map((part, i) => ({ sketch: i % 2 === 1, text: i % 2 === 1 ? part.replace(/^\n|\n$/g, "") : part.trim() }))
+		.filter(part => part.text !== "");
 }
