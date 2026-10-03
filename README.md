@@ -21,48 +21,41 @@ prompt.
 
 ## look
 
-```console
-✦ Heads up · Two payment tests were silently skipped because DATABASE_URL is not
-  set, leaving critical transaction logic unverified.
-  1: Learn more   2: Knew this already   0: Dismiss
-────────────────────────────────────────────────────────────────────────────────
-❯
-```
+<img src="./assets/readme/card-heads-up.png" width="100%"
+     alt="omp in a shop API project. The agent counted 41207 order notes, ran migration 0042 on staging and reported that it dropped three unused columns. Below that the card reads: Heads up · Migration 0042 drops orders.customer_note, which still holds notes on 41,207 orders, and nothing backs them up before it ships. 1: Learn more, 2: Knew this already, 0: Dismiss.">
 
-The same card as Claude Code's, cell for cell: the `✦` in its lavender, the tag
-dimmed, every wrapped line and the choices under the text. The tag is always
-`You should know` or `Heads up`.
+The agent counted the notes itself, then ran the migration and called it done.
+The card is laid out like Claude Code's, cell for cell: the `✦` in its lavender,
+the tag dimmed, wrapped lines under the text and the choices below. The tag is
+always `Heads up` or `You should know`.
 
-In that session the agent had run `sh ./test.sh`, seen
-`3 passed, 2 skipped, 0 failed`, and answered "Yes" when asked whether the tests
-were green.
+The explanation comes in the same reply as the card, so `1` opens it at once: at
+most 100 words, for someone who has not been following. Bold words take the
+card's lavender.
 
-The explanation is written in the same reply as the card, so `1` opens it at
-once, at most 100 words for someone who has not been following:
+<img src="./assets/readme/explanation.png" width="100%"
+     alt="The opened explanation for: Heads up · Checkout now retries a timed-out Stripe charge up to 3 times, but the retries carry no idempotency key. Title: A retry can charge a card twice. A short description, a two-line sketch showing a timed-out charge that Stripe completes anyway while the retry charges again, a before and now pair, and a closing line saying to send an idempotency key before this ships. Choices: 1: Understood, 2: Chat in main session, 0: Dismiss.">
 
-```text
-  Payment test suite skipped
+`2` quotes the card and its explanation in your prompt box, with an empty line
+under it for your question. Nothing reaches the main agent until you send it.
 
-  Automated tests can silently skip critical checks when required configuration
-  is missing. Running ./test.sh skipped both payment refund path and payment
-  double-charge guard.
+<img src="./assets/readme/chat-in-main.png" width="100%"
+     alt="The omp prompt box after pressing 2. It starts with: Here is a note offered by a side agent, followed by the card and its explanation as a quote.">
 
-  Expected: all 5 tests run and validate payments.
-  Actual: 3 passed, 2 skipped due to unset DATABASE_URL.
+`Heads up` is for something happening now. `You should know` is for how a part
+works, when the work depends on it:
 
-  You risk shipping unverified refund and billing safeguards unless you
-  configure the database environment variable and rerun the suite.
+<img src="./assets/readme/card-you-should-know.png" width="100%"
+     alt="A benchmark shows product listing latency falling from 312 ms to 9 ms after the agent added a cache. The card reads: You should know · Listings are now cached per region for 10 minutes, so a price edit reaches shoppers only when that region's copy expires.">
 
-  1: Understood   2: Chat in main session   0: Dismiss
-```
+<sub>Staged sessions: a scripted model drove omp in a sample project, so the
+wording is made up. The screens are omp's real rendering, captured from a
+terminal.</sub>
 
-Bold words take the card's lavender. `2` quotes the card and its explanation in
-your prompt box, with an empty line under it for your question; nothing reaches
-the main agent until you send it. Three keys the card does not show rewrite the
-explanation: `3` more plainly, `4` down to one point, `5` with the real files
-and settings. While one is being written the card reads `✦ One moment…`, with
-omp's shimmer running across it. If the first explanation cannot be written, the
-card says so in one line:
+Three keys the card does not show rewrite the explanation: `3` more plainly, `4`
+down to one point, `5` with the real files and settings. While one is being
+written the card reads `✦ One moment…`, with omp's shimmer running across it. If
+the first explanation cannot be written, the card says so in one line:
 
 ```console
 ✦ Couldn’t write that explanation · 0: OK
