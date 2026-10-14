@@ -1,6 +1,6 @@
 {
 	"name": "omp-you-should-know",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "A side agent watches your back while omp works and flags things you might miss, in a card above the prompt.",
 	"license": "MIT",
 	"type": "module",
@@ -20,16 +20,19 @@
 	},
 	"peerDependencies": {
 		"@oh-my-pi/pi-ai": "*",
+		"@oh-my-pi/pi-catalog": "*",
 		"@oh-my-pi/pi-coding-agent": "*",
 		"@oh-my-pi/pi-tui": "*"
 	},
 	"peerDependenciesMeta": {
 		"@oh-my-pi/pi-ai": { "optional": true },
+		"@oh-my-pi/pi-catalog": { "optional": true },
 		"@oh-my-pi/pi-coding-agent": { "optional": true },
 		"@oh-my-pi/pi-tui": { "optional": true }
 	},
 	"devDependencies": {
 		"@oh-my-pi/pi-ai": "18.4.9",
+		"@oh-my-pi/pi-catalog": "18.4.9",
 		"@oh-my-pi/pi-coding-agent": "18.4.9",
 		"@oh-my-pi/pi-tui": "18.4.9",
 		"@types/bun": "^1.2.0",

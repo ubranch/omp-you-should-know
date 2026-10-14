@@ -89,6 +89,10 @@ modelRoles:
   smol: <provider>/<model>
 ```
 
+Side requests ask for high reasoning with `reasoning: "high"`. The extension
+does not disable reasoning or change your model roles or account pool. omp's
+session-aware auth resolver keeps control of authentication and account selection.
+
 ## how it works
 
 1. After steps 6, 12, 18, and so on, the extension sends the session to the
@@ -105,12 +109,21 @@ modelRoles:
    lines do not count. An open explanation stays until you close it.
 6. If your prompts clear three cards in a row, the extension skips the next
    automatic check. Each next card that your prompts clear doubles the skip, to
-   a maximum of 16 checks. An answer to a card stops the skips. `/ysk check`
-   always runs. Each running omp keeps its own count, so cards in other panes
-   do not change it. Claude Code keeps one count for all sessions.
+   a maximum of 16 checks. An answer to a card stops the skips. These skips do
+   not apply to `/ysk check`. Each running omp keeps its own count, so cards in
+   other panes do not change it. Claude Code keeps one count for all sessions.
 7. `Knew this already`, `Understood`, and `Chat in main session` record the
    topic as known. The extension keeps the last 50 known topics, with no time
    limit. The model gets this list, and the extension drops these topics.
+
+Checks and explanations share a five-second gap between request starts in each
+running omp. A request can wait before inference starts. The gap and provider
+cooldown survive session switches. They are not shared across omp processes and
+do not limit the main agent's requests.
+
+Switching sessions, shutting down omp, or using `/ysk off` cancels pending side
+requests, including requests that are waiting for pacing. `0` cancels a pending
+explanation without showing an error.
 
 ## keys
 
@@ -147,11 +160,21 @@ keys.
 | :-- | :-- |
 | `~/.omp/agent/you-should-know.json` | On or off, the topics from the last three days, and the known topics |
 
-The extension logs each failed side request. omp sends a request again after a
-server error. A request fails if it gets no reply in 90 seconds. An automatic
-check shows its error one time in each session. `/ysk check` shows all errors.
-If the first explanation fails, the card shows the one line above. If a rewrite
-fails, omp shows the error, and the card keeps the current explanation.
+The extension logs each failed side request. Its 90-second inference deadline
+starts after pacing, when the request starts. The extension disables the
+provider's independent first-event watchdog for that request. If the deadline
+expires, the error says `no reply within 90 s`.
+
+Rate, concurrency, capacity, quota, and credit-balance failures put side requests
+into a cooldown using omp's rate-limit backoff helper. The error shows the
+remaining seconds. Requests during cooldown fail immediately without contacting
+the provider. Unknown errors and generic server errors do not start a cooldown.
+The extension does not retry or automatically resend failed requests. omp's
+provider and account handling can retry within a request.
+
+An automatic check shows its error one time in each session. `/ysk check` and
+explanations show all errors. If the first explanation fails, the card shows the
+one line above. If a rewrite fails, the card keeps the current explanation.
 
 </details>
 
@@ -191,3 +214,11 @@ omp --extension=./src/index.ts
 Keep the `=`. omp 18.4.9 reads `-e ./src/index.ts` as a chat message.
 `src/core.ts` has the testable logic, `src/prompts.ts` has the two prompts, and
 `src/index.ts` connects the extension to omp.
+
+`test/extension.e2e.test.ts` loads the real extension and sends Gemini and
+Antigravity requests to a local HTTP fixture. It checks high reasoning, pacing,
+cooldown, first-event handling, and cancellation without using your accounts.
+The fixture supplies the host context and captures rendered cards. It narrows
+the development package's host barrels to real exports; the completion library
+and providers stay real. It does not test the full TUI, live provider capacity,
+account rotation, or the complete 90-second wait.

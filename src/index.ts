@@ -1,8 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 // Package roots only: omp maps those onto its own running copy. A subpath import (`pi-tui/theme`)
 // resolves from the nearest node_modules instead, which is a second copy with its own classes and theme.
-import { completeSimple } from "@oh-my-pi/pi-ai";
+import { calculateRateLimitBackoffMs, completeSimple, parseRateLimitReason } from "@oh-my-pi/pi-ai";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -43,6 +45,7 @@ const WIDGET = "you-should-know";
 const DIGITS = ["0", "1", "2", "3", "4", "5"] as const;
 const MAX_TRANSCRIPT_CHARS = 48_000;
 const REQUEST_TIMEOUT_MS = 90_000;
+const REQUEST_SPACING_MS = 5_000;
 // Headroom over the answers (a topic plus a 100-word explanation; 160 words at most): some fast models still
 // spend output tokens on reasoning.
 const MAX_TOKENS = 3_000;
@@ -105,6 +108,8 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 	let view: View | undefined;
 	let tui: TUI | undefined;
 	let inFlight: AbortController | undefined;
+	let nextStartAt = 0;
+	let cooldownUntil = 0;
 	let unsubscribeKeys: (() => void) | undefined;
 	let warnedThisSession = false;
 	// Kept per running omp, not in the store: cards nobody answers in other panes must not quiet this one.
@@ -114,22 +119,70 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 	const active = (ctx: ExtensionContext) => ctx.hasUI && ctx.mode === "tui" && ctx.agent.kind === "main";
 
 	async function ask(ctx: ExtensionContext, system: string, request: string, signal: AbortSignal) {
+		const requestSessionId = ctx.sessionManager.getSessionId();
+		while (true) {
+			signal.throwIfAborted();
+			const now = performance.now();
+			if (cooldownUntil > now) {
+				throw new Error(`side requests cooling down; try again in ${Math.ceil((cooldownUntil - now) / 1000)} s`);
+			}
+			const waitMs = nextStartAt - now;
+			if (waitMs <= 0) break;
+			await delay(waitMs, undefined, { signal });
+		}
+		signal.throwIfAborted();
+		if (ctx.sessionManager.getSessionId() !== requestSessionId) throw new Error("session changed before side request started");
 		const model = ctx.models.resolve(MODEL);
 		if (!model) throw new Error(`no model matches ${MODEL}; set modelRoles.smol in your omp config`);
+		const apiKey = ctx.modelRegistry.resolver(model, requestSessionId);
+		signal.throwIfAborted();
 		const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-		const reply = await completeSimple(
-			model,
-			{ systemPrompt: [system], messages: [{ role: "user", content: request, timestamp: Date.now() }] },
-			{
-				apiKey: ctx.modelRegistry.resolver(model, ctx.sessionManager.getSessionId()),
-				disableReasoning: true,
-				maxTokens: MAX_TOKENS,
-				signal: AbortSignal.any([signal, timeout]),
-			},
-		);
-		if (reply.stopReason === "error" || reply.stopReason === "aborted") {
-			const why = timeout.aborted ? `no reply within ${REQUEST_TIMEOUT_MS / 1000} s` : (reply.errorMessage ?? reply.stopReason);
-			throw new Error(`${model.provider}/${model.id}: ${why}`);
+		nextStartAt = performance.now() + REQUEST_SPACING_MS;
+		let reply;
+		try {
+			reply = await completeSimple(
+				model,
+				{ systemPrompt: [system], messages: [{ role: "user", content: request, timestamp: Date.now() }] },
+				{
+					apiKey,
+					reasoning: Effort.High,
+					maxTokens: MAX_TOKENS,
+					// The plugin deadline owns slow starts, without a second provider watchdog.
+					streamFirstEventTimeoutMs: 0,
+					signal: AbortSignal.any([signal, timeout]),
+				},
+			);
+			signal.throwIfAborted();
+			timeout.throwIfAborted();
+			if (reply.stopReason === "error" || reply.stopReason === "aborted") {
+				throw new Error(reply.errorMessage ?? reply.stopReason);
+			}
+		} catch (error) {
+			signal.throwIfAborted();
+			if (timeout.aborted) throw new Error(`${model.provider}/${model.id}: no reply within ${REQUEST_TIMEOUT_MS / 1000} s`);
+			const message =
+				typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
+					? error.message
+					: errorText(error);
+			let reason = parseRateLimitReason(message);
+			const status = reply?.errorStatus ?? (typeof error === "object" && error !== null && "status" in error ? error.status : undefined);
+			const httpStatus =
+				status ?? /(?:^|\bHTTP(?: error)?\s+|\bstatus(?: code)?\s*[:=]?\s*)(429|402)\b/i.exec(message)?.[1];
+			if (reason === "UNKNOWN") {
+				if (httpStatus === 429 || httpStatus === "429") reason = "RATE_LIMIT_EXCEEDED";
+				else if (httpStatus === 402 || httpStatus === "402") reason = "QUOTA_EXHAUSTED";
+			}
+			if (
+				reason === "RATE_LIMIT_EXCEEDED" ||
+				reason === "CONCURRENT_LIMIT" ||
+				reason === "MODEL_CAPACITY_EXHAUSTED" ||
+				reason === "QUOTA_EXHAUSTED" ||
+				reason === "INSUFFICIENT_G1_CREDITS_BALANCE"
+			) {
+				cooldownUntil = Math.max(cooldownUntil, performance.now() + calculateRateLimitBackoffMs(reason));
+			}
+			const remaining = Math.ceil(Math.max(0, cooldownUntil - performance.now()) / 1000);
+			throw new Error(`${model.provider}/${model.id}: ${message}${remaining ? `; side requests cooling down for ${remaining} s` : ""}`);
 		}
 		// A reply cut at MAX_TOKENS would show a half sentence as if it were the whole point.
 		if (reply.stopReason === "length") throw new Error(`${model.provider}/${model.id}: reply cut off at ${MAX_TOKENS} tokens`);
@@ -175,9 +228,9 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 				const parts =
 					current.kind === "explained"
 						? splitSketches(current.text).map(part => ({
-								...part,
-								md: part.sketch ? undefined : new Markdown(part.text, 0, 0, markdownTheme),
-							}))
+							...part,
+							md: part.sketch ? undefined : new Markdown(part.text, 0, 0, markdownTheme),
+						}))
 						: [];
 				return {
 					render(width: number): string[] {
@@ -273,12 +326,11 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		})()
 			.catch(error => {
 				if (abort.signal.aborted) return;
+				report(ctx, "explanation", error, true);
 				// A failed rewrite keeps the explanation already on screen; a failed first one leaves the failed card.
 				if (previous) {
-					report(ctx, "explanation", error, true);
 					view = { kind: "explained", finding, text: previous };
 				} else {
-					logger.warn(`${NAME}: explanation failed`, { error: errorText(error) });
 					view = { kind: "failed", finding };
 				}
 				render(ctx);
@@ -335,7 +387,8 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	// omp drops every extension key listener and widget when it switches sessions (/new, /resume, /fork).
 	pi.on("session_switch", (_event, ctx) => {
-		if (view) clear(ctx);
+		clear(ctx);
+		warnedThisSession = false;
 		if (active(ctx)) listenForDigits(ctx);
 	});
 
