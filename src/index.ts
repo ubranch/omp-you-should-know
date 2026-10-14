@@ -24,6 +24,7 @@ import {
 	type Depth,
 	EXPLAINED_CHOICES,
 	failedLine,
+	type Finding,
 	type Ink,
 	isCheckTurn,
 	isPrompt,
@@ -44,14 +45,18 @@ const MODEL = "@smol";
 const WIDGET = "you-should-know";
 const DIGITS = ["0", "1", "2", "3", "4", "5"] as const;
 const MAX_TRANSCRIPT_CHARS = 48_000;
-const REQUEST_TIMEOUT_MS = 90_000;
+const REQUEST_TIMEOUT_MS = 15 * 60_000;
 const REQUEST_SPACING_MS = 5_000;
-// Headroom over the answers (a topic plus a 100-word explanation; 160 words at most): some fast models still
-// spend output tokens on reasoning.
-const MAX_TOKENS = 3_000;
 const STORE_FILE = path.join(getAgentDir(), "you-should-know.json");
 /** OMP_YSK_DEBUG=1 also reports automatic checks that found nothing. */
 const DEBUG = process.env.OMP_YSK_DEBUG === "1";
+
+type SideModel = Parameters<typeof completeSimple>[0];
+type ActiveOperation = {
+	kind: "check" | "explain";
+	abort: AbortController;
+	sessionId: string;
+};
 
 interface Store {
 	enabled: boolean;
@@ -107,7 +112,8 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	let view: View | undefined;
 	let tui: TUI | undefined;
-	let inFlight: AbortController | undefined;
+	let inFlight: ActiveOperation | undefined;
+	let lastCompletedCheck: { key: string; finding: Finding | null; resolveHeaders?: SideModel["resolveHeaders"] } | undefined;
 	let nextStartAt = 0;
 	let cooldownUntil = 0;
 	let unsubscribeKeys: (() => void) | undefined;
@@ -118,8 +124,9 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	const active = (ctx: ExtensionContext) => ctx.hasUI && ctx.mode === "tui" && ctx.agent.kind === "main";
 
-	async function ask(ctx: ExtensionContext, system: string, request: string, signal: AbortSignal) {
-		const requestSessionId = ctx.sessionManager.getSessionId();
+	async function ask(ctx: ExtensionContext, model: SideModel, system: string, request: string, op: ActiveOperation) {
+		const { signal } = op.abort;
+		const requestSessionId = op.sessionId;
 		while (true) {
 			signal.throwIfAborted();
 			const now = performance.now();
@@ -132,8 +139,6 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		}
 		signal.throwIfAborted();
 		if (ctx.sessionManager.getSessionId() !== requestSessionId) throw new Error("session changed before side request started");
-		const model = ctx.models.resolve(MODEL);
-		if (!model) throw new Error(`no model matches ${MODEL}; set modelRoles.smol in your omp config`);
 		const apiKey = ctx.modelRegistry.resolver(model, requestSessionId);
 		signal.throwIfAborted();
 		const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
@@ -146,7 +151,6 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 				{
 					apiKey,
 					reasoning: Effort.High,
-					maxTokens: MAX_TOKENS,
 					// The plugin deadline owns slow starts, without a second provider watchdog.
 					streamFirstEventTimeoutMs: 0,
 					signal: AbortSignal.any([signal, timeout]),
@@ -159,6 +163,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			}
 		} catch (error) {
 			signal.throwIfAborted();
+			if (inFlight !== op || ctx.sessionManager.getSessionId() !== requestSessionId) throw error;
 			if (timeout.aborted) throw new Error(`${model.provider}/${model.id}: no reply within ${REQUEST_TIMEOUT_MS / 1000} s`);
 			const message =
 				typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
@@ -184,8 +189,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			const remaining = Math.ceil(Math.max(0, cooldownUntil - performance.now()) / 1000);
 			throw new Error(`${model.provider}/${model.id}: ${message}${remaining ? `; side requests cooling down for ${remaining} s` : ""}`);
 		}
-		// A reply cut at MAX_TOKENS would show a half sentence as if it were the whole point.
-		if (reply.stopReason === "length") throw new Error(`${model.provider}/${model.id}: reply cut off at ${MAX_TOKENS} tokens`);
+		if (reply.stopReason === "length") throw new Error(`${model.provider}/${model.id}: reply cut off at the model's output token limit`);
 		return reply.content
 			.filter(part => part.type === "text")
 			.map(part => part.text)
@@ -268,8 +272,9 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 	}
 
 	function clear(ctx: ExtensionContext) {
-		inFlight?.abort();
+		const previous = inFlight;
 		inFlight = undefined;
+		previous?.abort.abort();
 		view = undefined;
 		render(ctx);
 	}
@@ -287,13 +292,38 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			if (DEBUG) ctx.ui.notify(`${NAME}: skipped a check after ${ignoredInARow} ignored cards; ${checksToSkip} more to skip.`, "info");
 			return;
 		}
-		const abort = new AbortController();
-		inFlight = abort;
+		const op: ActiveOperation = { kind: "check", abort: new AbortController(), sessionId: ctx.sessionManager.getSessionId() };
+		inFlight = op;
 		if (manual) ctx.ui.notify(`${NAME}: checking the session…`, "info");
 		void (async () => {
+			const model = ctx.models.resolve(MODEL);
+			if (!model) throw new Error(`no model matches ${MODEL}; set modelRoles.smol in your omp config`);
+			const resolveHeaders = model.resolveHeaders;
 			const { seen, known } = store;
-			const finding = parseCheckReply(await ask(ctx, CHECK_SYSTEM, checkRequest(transcript(ctx), seen, known), abort.signal));
-			if (abort.signal.aborted || view) return;
+			const request = checkRequest(transcript(ctx), seen, known);
+			// Static headers can contain secrets, so this key stays private and is never logged or persisted.
+			const key = JSON.stringify(
+				[op.sessionId, CHECK_SYSTEM, request, model, Effort.High, 0, REQUEST_TIMEOUT_MS],
+				function(this: unknown, name: string, value: unknown) {
+					return this === model && (name === "name" || name === "cost") ? undefined : value;
+				},
+			);
+			const cached =
+				lastCompletedCheck?.key === key && lastCompletedCheck.resolveHeaders === resolveHeaders
+					? lastCompletedCheck
+					: undefined;
+			let reply: string | undefined;
+			let finding: Finding | null | undefined;
+			if (cached) {
+				finding = cached.finding;
+			} else {
+				reply = await ask(ctx, model, CHECK_SYSTEM, request, op);
+				finding = parseCheckReply(reply);
+			}
+			if (inFlight !== op || op.abort.signal.aborted || ctx.sessionManager.getSessionId() !== op.sessionId || view) return;
+			if (!cached && (finding || (reply !== undefined && /^learn:\s*none$/i.test(reply)))) {
+				lastCompletedCheck = { key, finding: finding ?? null, resolveHeaders };
+			}
 			if (!finding || wasSeen([...seen.map(s => s.topic), ...known], finding.topic)) {
 				if (manual || DEBUG) ctx.ui.notify(`${NAME}: nothing worth flagging right now.`, "info");
 				return;
@@ -303,10 +333,12 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			render(ctx);
 		})()
 			.catch(error => {
-				if (!abort.signal.aborted) report(ctx, "check", error, manual);
+				if (inFlight === op && !op.abort.signal.aborted && ctx.sessionManager.getSessionId() === op.sessionId) {
+					report(ctx, "check", error, manual);
+				}
 			})
 			.finally(() => {
-				if (inFlight === abort) inFlight = undefined;
+				if (inFlight === op) inFlight = undefined;
 			});
 	}
 
@@ -314,18 +346,20 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		if (!view || view.kind === "explaining") return;
 		const finding = view.finding;
 		const previous = view.kind === "explained" ? view.text : undefined;
-		const abort = new AbortController();
-		inFlight = abort;
+		const op: ActiveOperation = { kind: "explain", abort: new AbortController(), sessionId: ctx.sessionManager.getSessionId() };
+		inFlight = op;
 		view = { kind: "explaining", finding };
 		render(ctx);
 		void (async () => {
-			const text = await ask(ctx, EXPLAIN_SYSTEM, explainRequest(transcript(ctx), finding, depth, previous), abort.signal);
-			if (abort.signal.aborted) return;
+			const model = ctx.models.resolve(MODEL);
+			if (!model) throw new Error(`no model matches ${MODEL}; set modelRoles.smol in your omp config`);
+			const text = await ask(ctx, model, EXPLAIN_SYSTEM, explainRequest(transcript(ctx), finding, depth, previous), op);
+			if (inFlight !== op || op.abort.signal.aborted || ctx.sessionManager.getSessionId() !== op.sessionId) return;
 			view = { kind: "explained", finding, text };
 			render(ctx);
 		})()
 			.catch(error => {
-				if (abort.signal.aborted) return;
+				if (inFlight !== op || op.abort.signal.aborted || ctx.sessionManager.getSessionId() !== op.sessionId) return;
 				report(ctx, "explanation", error, true);
 				// A failed rewrite keeps the explanation already on screen; a failed first one leaves the failed card.
 				if (previous) {
@@ -336,7 +370,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 				render(ctx);
 			})
 			.finally(() => {
-				if (inFlight === abort) inFlight = undefined;
+				if (inFlight === op) inFlight = undefined;
 			});
 	}
 
@@ -387,15 +421,28 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	// omp drops every extension key listener and widget when it switches sessions (/new, /resume, /fork).
 	pi.on("session_switch", (_event, ctx) => {
+		lastCompletedCheck = undefined;
 		clear(ctx);
 		warnedThisSession = false;
 		if (active(ctx)) listenForDigits(ctx);
 	});
 
 	pi.on("session_shutdown", () => {
-		inFlight?.abort();
+		const previous = inFlight;
+		inFlight = undefined;
+		previous?.abort.abort();
+		lastCompletedCheck = undefined;
 		unsubscribeKeys?.();
 		unsubscribeKeys = undefined;
+	});
+
+	pi.on("before_agent_start", (_event, ctx) => {
+		if (!active(ctx)) return;
+		lastCompletedCheck = undefined;
+		if (inFlight?.kind !== "check") return;
+		const previous = inFlight;
+		inFlight = undefined;
+		previous.abort.abort();
 	});
 
 	pi.on("input", (event, ctx) => {
@@ -426,7 +473,10 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			const arg = args.trim().toLowerCase();
 			if (arg === "on" || arg === "off") {
 				updateStore(store => ({ ...store, enabled: arg === "on" }));
-				if (arg === "off" && (view || inFlight)) clear(ctx);
+				if (arg === "off") {
+					lastCompletedCheck = undefined;
+					clear(ctx);
+				}
 				ctx.ui.notify(`${NAME} is ${arg}.`, "info");
 				return;
 			}

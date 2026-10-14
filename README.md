@@ -92,6 +92,9 @@ modelRoles:
 Side requests ask for high reasoning with `reasoning: "high"`. The extension
 does not disable reasoning or change your model roles or account pool. omp's
 session-aware auth resolver keeps control of authentication and account selection.
+Side requests use the model-supported output budget (65,536 tokens for Gemini
+3.8 Flash), rather than a smaller extension cap. High reasoning can consume more
+tokens; the visible answer prompts still ask for 100 words, or 160 words at most.
 
 ## how it works
 
@@ -115,6 +118,25 @@ session-aware auth resolver keeps control of authentication and account selectio
 7. `Knew this already`, `Understood`, and `Chat in main session` record the
    topic as known. The extension keeps the last 50 known topics, with no time
    limit. The model gets this list, and the extension drops these topics.
+
+When a long session exceeds the 48,000-character context budget, user
+instructions and the latest compaction summary take priority over routine
+assistant and tool output. Selected context stays in chronological order.
+Oversized instructions are excerpted rather than kept in full.
+
+An accepted new user request cancels an unfinished check, so its old result
+cannot appear later. Ordinary tool turns and slash commands do not cancel it.
+An explanation you requested keeps running when you submit a new request.
+
+The last successful check is reused when its full input and model configuration
+match. A reused check makes no model call, resolves no credentials, and does not
+wait for request pacing. Failed, cancelled, truncated, and malformed replies are
+not reused. Explanations are generated on demand rather than cached.
+
+The cache exists only in the running extension. A new accepted user request,
+session switch, shutdown, or `/ysk off` clears it. Model configuration comparison
+does not rerun dynamic header commands. Different output from an unchanged
+header command alone does not invalidate a cached result.
 
 Checks and explanations share a five-second gap between request starts in each
 running omp. A request can wait before inference starts. The gap and provider
@@ -148,7 +170,7 @@ keys.
 | Command | What it does |
 | :-- | :-- |
 | `/ysk` | Shows on or off, the side model, the current card, and the checks that it will skip |
-| `/ysk check` | Runs a check now. It tells you if it finds nothing |
+| `/ysk check` | Checks now and tells you if it finds nothing. Identical inputs may reuse the last successful result |
 | `/ysk on` · `/ysk off` | Turns checks on or off. The setting stays for all sessions |
 | `/ysk 1` … `/ysk 5` · `/ysk 0` | Selects a card choice. Use it when the prompt box has text |
 
@@ -160,10 +182,10 @@ keys.
 | :-- | :-- |
 | `~/.omp/agent/you-should-know.json` | On or off, the topics from the last three days, and the known topics |
 
-The extension logs each failed side request. Its 90-second inference deadline
+The extension logs each failed side request. Its 15-minute inference deadline
 starts after pacing, when the request starts. The extension disables the
 provider's independent first-event watchdog for that request. If the deadline
-expires, the error says `no reply within 90 s`.
+expires, the error says `no reply within 900 s`.
 
 Rate, concurrency, capacity, quota, and credit-balance failures put side requests
 into a cooldown using omp's rate-limit backoff helper. The error shows the
@@ -221,4 +243,4 @@ cooldown, first-event handling, and cancellation without using your accounts.
 The fixture supplies the host context and captures rendered cards. It narrows
 the development package's host barrels to real exports; the completion library
 and providers stay real. It does not test the full TUI, live provider capacity,
-account rotation, or the complete 90-second wait.
+account rotation, or the complete 15-minute wait.

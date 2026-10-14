@@ -169,31 +169,102 @@ function linesOf(entry: TranscriptEntry): string[] {
 	return lines;
 }
 
+function excerpt(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	if (maxChars <= 1) return text.slice(0, maxChars);
+	const head = Math.ceil((maxChars - 1) / 2);
+	const tail = maxChars - head - 1;
+	return `${text.slice(0, head)}…${tail ? text.slice(-tail) : ""}`;
+}
+
 /**
- * Renders the branch from the last compaction onward. Over budget, it keeps the first user ask
- * and as much of the tail as fits.
+ * Renders from the last compaction onward. Over budget, goals precede recent work,
+ * with bounded summary, first-user and latest-user anchors when goals alone overflow.
  */
 // ponytail: char budget, not tokens; switch to a tokenizer if smol models start overflowing.
 export function buildTranscript(entries: readonly TranscriptEntry[], maxChars: number): string {
+	maxChars = Math.floor(maxChars);
+	if (!(maxChars > 0)) return "";
 	let start = 0;
-	entries.forEach((entry, i) => {
-		if (entry.type === "compaction") start = i;
-	});
-	const lines = entries.slice(start).flatMap(linesOf);
-	const full = lines.join("\n");
-	if (full.length <= maxChars) return full;
-
-	const firstAsk = lines.find(l => l.startsWith("USER: ") || l.startsWith("EARLIER ")) ?? "";
-	const head = `${clip(firstAsk, Math.floor(maxChars / 4))}\n… (earlier steps omitted) …`;
-	const tail: string[] = [];
-	let used = head.length;
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i] ?? "";
-		if (used + line.length + 1 > maxChars) break;
-		tail.unshift(line);
-		used += line.length + 1;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		if (entries[i]?.type === "compaction") {
+			start = i;
+			break;
+		}
 	}
-	return `${head}\n${tail.join("\n")}`;
+	const records: { text: string; kind: "summary" | "user" | "other"; ordinal: number; selected?: string }[] = [];
+	let fullCost = 0;
+	let goalCost = 0;
+	let summary = -1;
+	let firstUser = -1;
+	let latestUser = -1;
+	for (let i = start; i < entries.length; i++) {
+		const entry = entries[i];
+		if (!entry) continue;
+		const kind = entry.type === "compaction" ? "summary"
+			: entry.type === "message" && entry.message?.role === "user" ? "user" : "other";
+		for (const text of linesOf(entry)) {
+			const ordinal = records.length;
+			records.push({ text, kind, ordinal });
+			fullCost += text.length + 1;
+			if (kind !== "other") goalCost += text.length + 1;
+			if (kind === "summary") summary = ordinal;
+			if (kind === "user") {
+				if (firstUser < 0) firstUser = ordinal;
+				latestUser = ordinal;
+			}
+		}
+	}
+	if (fullCost <= maxChars + 1) return records.map(record => record.text).join("\n");
+
+	const anchors: number[] = [];
+	for (const ordinal of [summary, firstUser, latestUser]) {
+		if (ordinal >= 0 && !anchors.includes(ordinal)) anchors.push(ordinal);
+	}
+	let remainingWithSeparatorCredit = maxChars + 1;
+	if (goalCost <= remainingWithSeparatorCredit) {
+		for (const record of records) {
+			if (record.kind === "other") continue;
+			record.selected = record.text;
+			remainingWithSeparatorCredit -= record.text.length + 1;
+		}
+	} else {
+		for (let i = 0; i < anchors.length; i++) {
+			const record = records[anchors[i] ?? -1];
+			if (!record) continue;
+			const allowance = i === anchors.length - 1 ? remainingWithSeparatorCredit - 1
+				: Math.min(Math.floor(maxChars / 4), remainingWithSeparatorCredit - 3);
+			if (allowance <= 0) continue;
+			record.selected = excerpt(record.text, allowance);
+			remainingWithSeparatorCredit -= record.selected.length + 1;
+		}
+		for (let i = records.length - 1; i >= 0; i--) {
+			const record = records[i];
+			if (!record || record.kind === "other" || record.selected !== undefined) continue;
+			if (record.text.length + 1 > remainingWithSeparatorCredit) continue;
+			record.selected = record.text;
+			remainingWithSeparatorCredit -= record.text.length + 1;
+		}
+	}
+
+	const marker = "… (earlier steps omitted) …";
+	const includeMarker = marker.length + 1 <= remainingWithSeparatorCredit;
+	if (includeMarker) remainingWithSeparatorCredit -= marker.length + 1;
+	for (let i = records.length - 1; i >= 0; i--) {
+		const record = records[i];
+		if (!record || record.kind !== "other" || record.text.length + 1 > remainingWithSeparatorCredit) continue;
+		record.selected = record.text;
+		remainingWithSeparatorCredit -= record.text.length + 1;
+	}
+	const markerAfter = anchors.find(ordinal => records[ordinal]?.selected !== undefined) ?? -1;
+	const output: string[] = [];
+	if (includeMarker && markerAfter < 0) output.push(marker);
+	for (const record of records) {
+		if (record.selected === undefined) continue;
+		output.push(record.selected);
+		if (includeMarker && record.ordinal === markerAfter) output.push(marker);
+	}
+	return output.join("\n");
 }
 
 // ---------------------------------------------------------------------------
