@@ -186,8 +186,8 @@ The extension logs each failed side request to the omp log. Failures never print
 to the chat. The card shows one short line instead, such as
 `✦ Couldn’t check the session (busy, retry in 30 s) · 0: OK`. Press `0` to close it.
 
-Each side request has a 15-minute deadline. It starts after pacing. The
-provider's own first-event watchdog is off for that request.
+Each side request has a 15-minute deadline. It starts after pacing. If the
+provider sends no stream event within 90 s, the request retries and falls back.
 
 Server overload ("high demand", 5xx, 408), network drops, and empty replies are
 retried one time, 5 s later. If the model still fails, the request falls back to

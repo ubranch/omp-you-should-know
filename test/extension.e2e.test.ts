@@ -211,7 +211,7 @@ for (const scenario of lifecycleScenarios) {
 	}, 30_000);
 }
 
-test("the plugin deadline owns a slow first event instead of the provider watchdog", async () => {
+test("a slow first event under 90 s is not cut off by the model's shorter watchdog", async () => {
 	const result = await reproduce("first-event");
 	expectNoFinding(result, 1);
 	expect(result).toMatchObject({

@@ -46,6 +46,8 @@ const WIDGET = "you-should-know";
 const DIGITS = ["0", "1", "2", "3", "4", "5"] as const;
 const MAX_TRANSCRIPT_CHARS = 48_000;
 const REQUEST_TIMEOUT_MS = 15 * 60_000;
+/** A provider that sends no stream event in this time is stuck; a reasoning model has already started streaming by then. */
+const FIRST_EVENT_TIMEOUT_MS = 90_000;
 const REQUEST_SPACING_MS = 5_000;
 const STORE_FILE = path.join(getAgentDir(), "you-should-know.json");
 /** OMP_YSK_DEBUG=1 also reports automatic checks that found nothing. */
@@ -203,8 +205,8 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 				{
 					apiKey,
 					reasoning: model.provider === "openai-codex" ? Effort.Max : Effort.High,
-					// The plugin deadline owns slow starts, without a second provider watchdog.
-					streamFirstEventTimeoutMs: 0,
+					// A silent provider fails over after 90 s; once it streams, only the 15-minute deadline applies.
+					streamFirstEventTimeoutMs: FIRST_EVENT_TIMEOUT_MS,
 					signal: AbortSignal.any([signal, timeout]),
 				},
 			);
@@ -224,7 +226,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			const status = reply?.errorStatus ?? (typeof error === "object" && error !== null && "status" in error ? error.status : undefined);
 			const httpStatus = Number(status ?? /(?:^|\bHTTP(?: error)?\s+|\bstatus(?: code)?\s*[:=]?\s*)([1-5]\d\d)\b/i.exec(message)?.[1]);
 			// Server-side overload ("high demand", 503) clears in seconds, so it is retried before any cooldown.
-			if (httpStatus === 408 || httpStatus >= 500 || /overload|high demand|unavailable|try again later|internal error|fetch failed|socket|ECONNRESET|ETIMEDOUT/i.test(message)) {
+			if (httpStatus === 408 || httpStatus >= 500 || /overload|high demand|unavailable|try again later|internal error|first event|fetch failed|socket|ECONNRESET|ETIMEDOUT/i.test(message)) {
 				throw new SideFailure("busy", `${name}: ${message}`, true);
 			}
 			let reason = parseRateLimitReason(message);
