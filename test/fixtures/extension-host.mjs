@@ -32,6 +32,7 @@ host.initThemeSync();
 
 const notifications = [];
 const cards = [];
+const statuses = [];
 const requests = [];
 const transports = [];
 const listeners = new Set();
@@ -79,7 +80,7 @@ const server = Bun.serve({
 	async fetch(request) {
 		const url = new URL(request.url);
 		assert.equal(request.method, "POST");
-		const modelPaths = [model, sessionModel].map(m => `/v1beta/models/${m.id}:streamGenerateContent`);
+		const modelPaths = [model, fallbackModel].map(m => `/v1beta/models/${m.id}:streamGenerateContent`);
 		assert.ok(provider === "google" ? modelPaths.includes(url.pathname) : url.pathname === "/v1internal:streamGenerateContent");
 		assert.equal(url.search, "?alt=sse");
 		assert.equal(request.headers.get(provider === "google" ? "x-goog-api-key" : "authorization"), provider === "google" ? "fixture-key" : "Bearer fixture-token");
@@ -162,12 +163,12 @@ async function resolveFixtureHeaders(signal) {
 if (scenario === "cache-header-config") {
 	model = { ...model, headers: { "X-Test-Static": "A" }, resolveHeaders: resolveFixtureHeaders };
 }
-// The session's own model, which the plugin falls back to; a different model only in the fallback scenario.
-let sessionModel = model;
+// Stands in for Codex gpt-6-luna in the fallback scenario so the request reaches this server.
+let fallbackModel = model;
 if (scenario === "fallback") {
 	const alternate = getBundledModel(provider, "gemini-2.5-flash");
 	assert.ok(alternate, "The installed OMP catalog must contain the fallback model");
-	sessionModel = { ...alternate, baseUrl: model.baseUrl };
+	fallbackModel = { ...alternate, baseUrl: model.baseUrl };
 }
 const boundary = (name, values) => new Proxy(values, {
 	get(target, key) {
@@ -180,18 +181,18 @@ const ctx = boundary("context", {
 	mode: "tui",
 	agent: { kind: "main" },
 	cwd: process.cwd(),
-	get model() { return scenario === "fallback" ? sessionModel : model; },
+	model,
 	models: boundary("models", {
 		resolve(selector) {
-			if (selector === "openai-codex/gpt-6-luna") return getBundledModel("openai-codex", "gpt-6-luna");
+			if (selector === "openai-codex/gpt-6-luna") return scenario === "fallback" ? fallbackModel : getBundledModel("openai-codex", "gpt-6-luna");
 			assert.equal(selector, "@smol");
 			return model;
 		},
 	}),
 	modelRegistry: boundary("modelRegistry", {
-		hasConfiguredAuth: selected => selected.provider !== "openai-codex",
+		hasConfiguredAuth: selected => scenario === "fallback" || selected.provider !== "openai-codex",
 		resolver(selected, id) {
-			assert.ok(selected === model || selected === sessionModel);
+			assert.ok(selected === model || selected === fallbackModel);
 			assert.equal(id, sessionId);
 			resolverCalls++;
 			return provider === "google" ? "fixture-key" : JSON.stringify({ token: "fixture-token", projectId: "fixture-project" });
@@ -205,6 +206,7 @@ const ctx = boundary("context", {
 		notify(message, kind) { notifications.push({ message, kind, sessionId }); pulse(); },
 		onTerminalInput: () => () => { },
 		getEditorText: () => "",
+		setStatus(key, text) { assert.equal(key, "you-should-know"); statuses.push(text ?? null); },
 		setWidget(key, content, options) {
 			assert.equal(key, "you-should-know");
 			widget?.dispose?.();
@@ -402,6 +404,7 @@ try {
 		cards,
 		currentCard,
 		requests,
+		statuses,
 		transportAborted: transports.map(t => t.signal.aborted),
 		paced: requests.length === 2 && requests[1].receivedAt - requests[0].receivedAt >= 4_900,
 		resolverCalls,

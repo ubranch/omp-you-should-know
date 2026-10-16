@@ -192,7 +192,9 @@ provider sends no stream event within 90 s, the request retries and falls back.
 Server overload ("high demand", 5xx, 408), network drops, and empty replies are
 retried one time, 5 s later. If the model still fails, the request falls back to
 `openai-codex/gpt-6-luna` at `max` reasoning when a Codex subscription is logged
-in, then to the session's main model. Timeouts and bad requests are not retried.
+in. The session's main model is never used. Timeouts and bad requests are not
+retried. While it retries or falls back, the omp footer shows the step, such as
+`You should know: busy, trying gpt-6-luna…`.
 
 Rate, concurrency, capacity, quota, and credit-balance failures put that model
 into a cooldown using omp's rate-limit backoff helper. Requests to a cooling

@@ -34,6 +34,7 @@ interface FixtureResult {
 	cards: string[][];
 	currentCard: string[];
 	requests: ReceivedRequest[];
+	statuses: (string | null)[];
 	transportAborted: boolean[];
 	paced: boolean;
 	resolverCalls: number;
@@ -177,15 +178,21 @@ test("a high-demand 503 is retried and the check completes without any error sho
 	expect(failedCards(result)).toEqual([]);
 	expect(result.requests).toHaveLength(2);
 	expectPacedMisses(result.requests);
+	expect(result.statuses).toEqual(["You should know: busy, retrying gemini-3.8-flash…", null]);
 }, 30_000);
 
-test("a side model that stays unavailable falls back to the session model", async () => {
+test("a side model that stays unavailable falls back to the Codex model, showing each step in the footer", async () => {
 	const result = await reproduce("fallback", "google");
 	expectNoFinding(result, 1);
 	expect(failedCards(result)).toEqual([]);
 	const paths = result.requests.map(r => r.path);
 	expect(new Set(paths).size).toBe(2);
 	expect(paths.at(-1)).not.toBe(paths[0]);
+	expect(result.statuses).toEqual([
+		"You should know: busy, retrying gemini-3.8-flash…",
+		"You should know: busy, trying gemini-2.5-flash…",
+		null,
+	]);
 }, 30_000);
 
 test("/ysk off cancels a pacing wait without sending its delayed request", async () => {

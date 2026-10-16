@@ -141,36 +141,41 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	const active = (ctx: ExtensionContext) => ctx.hasUI && ctx.mode === "tui" && ctx.agent.kind === "main";
 
-	/** Side models in fallback order: the configured role, Codex gpt-6-luna when a Codex login exists, then the session's model. */
+	/** Side models in fallback order: the configured role, then Codex gpt-6-luna when a Codex login exists. */
 	function sideModels(ctx: ExtensionContext): SideModel[] {
 		const models: SideModel[] = [];
 		const luna = ctx.models.resolve(CODEX_FALLBACK);
-		for (const model of [ctx.models.resolve(MODEL), luna && ctx.modelRegistry.hasConfiguredAuth(luna) ? luna : undefined, ctx.model]) {
+		for (const model of [ctx.models.resolve(MODEL), luna && ctx.modelRegistry.hasConfiguredAuth(luna) ? luna : undefined]) {
 			if (model && !models.some(m => m.provider === model.provider && m.id === model.id)) models.push(model);
 		}
 		return models;
 	}
 
-	/** Retries transient failures with growing spacing, then falls back to the next side model. */
+	/** Retries transient failures, then falls back to the next side model; the footer status shows each step. */
 	async function ask(ctx: ExtensionContext, system: string, request: string, op: ActiveOperation): Promise<string> {
 		const models = sideModels(ctx);
 		if (models.length === 0) {
 			throw new SideFailure("no side model", `no model matches ${MODEL}; set modelRoles.smol in your omp config`, false);
 		}
 		let failure: SideFailure | undefined;
-		for (const model of models) {
-			for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
-				try {
-					return await askOnce(ctx, model, system, request, op);
-				} catch (error) {
-					op.abort.signal.throwIfAborted();
-					if (!(error instanceof SideFailure)) throw error;
-					failure = error;
-					logger.warn(`${NAME}: side request attempt ${attempt} failed`, { error: error.message });
-					// The 5 s request spacing is the backoff before the retry or the next model.
-					if (!error.retry) break;
+		try {
+			for (const model of models) {
+				for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+					if (failure) ctx.ui.setStatus(WIDGET, `${NAME}: ${failure.short}, ${attempt > 1 ? "retrying" : "trying"} ${model.id}…`);
+					try {
+						return await askOnce(ctx, model, system, request, op);
+					} catch (error) {
+						op.abort.signal.throwIfAborted();
+						if (!(error instanceof SideFailure)) throw error;
+						failure = error;
+						logger.warn(`${NAME}: side request attempt ${attempt} failed`, { error: error.message });
+						// The 5 s request spacing is the backoff before the retry or the next model.
+						if (!error.retry) break;
+					}
 				}
 			}
+		} finally {
+			if (failure) ctx.ui.setStatus(WIDGET, undefined);
 		}
 		throw failure;
 	}
