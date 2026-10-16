@@ -182,21 +182,25 @@ keys.
 | :-- | :-- |
 | `~/.omp/agent/you-should-know.json` | On or off, the topics from the last three days, and the known topics |
 
-The extension logs each failed side request. Its 15-minute inference deadline
-starts after pacing, when the request starts. The extension disables the
-provider's independent first-event watchdog for that request. If the deadline
-expires, the error says `no reply within 900 s`.
+The extension logs each failed side request to the omp log. Failures never print
+to the chat. The card shows one short line instead, such as
+`✦ Couldn’t check the session (busy, retry in 30 s) · 0: OK`. Press `0` to close it.
 
-Rate, concurrency, capacity, quota, and credit-balance failures put side requests
-into a cooldown using omp's rate-limit backoff helper. The error shows the
-remaining seconds. Requests during cooldown fail immediately without contacting
-the provider. Unknown errors and generic server errors do not start a cooldown.
-The extension does not retry or automatically resend failed requests. omp's
-provider and account handling can retry within a request.
+Each side request has a 15-minute deadline. It starts after pacing. The
+provider's own first-event watchdog is off for that request.
 
-An automatic check shows its error one time in each session. `/ysk check` and
-explanations show all errors. If the first explanation fails, the card shows the
-one line above. If a rewrite fails, the card keeps the current explanation.
+Server overload ("high demand", 5xx, 408), network drops, and empty replies are
+retried one time, 5 s later. If the model still fails, the request falls back to
+`openai-codex/gpt-6-luna` at `max` reasoning when a Codex subscription is logged
+in, then to the session's main model. Timeouts and bad requests are not retried.
+
+Rate, concurrency, capacity, quota, and credit-balance failures put that model
+into a cooldown using omp's rate-limit backoff helper. Requests to a cooling
+model skip it without contacting the provider and try the next model.
+
+An automatic check shows its failure card one time in each session. `/ysk check`
+and explanations show every failure. If a rewrite fails, the card keeps the
+current explanation.
 
 </details>
 

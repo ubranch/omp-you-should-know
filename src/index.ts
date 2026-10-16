@@ -52,6 +52,21 @@ const STORE_FILE = path.join(getAgentDir(), "you-should-know.json");
 const DEBUG = process.env.OMP_YSK_DEBUG === "1";
 
 type SideModel = Parameters<typeof completeSimple>[0];
+/** Fallback used only when the person has a Codex subscription login. */
+const CODEX_FALLBACK = "openai-codex/gpt-6-luna";
+/** Tries per side model before falling back to the next one; only transient failures are retried. */
+const ATTEMPTS = 2;
+
+/** A side request failure: `short` goes on the card, the message goes to the log. */
+class SideFailure extends Error {
+	constructor(
+		readonly short: string,
+		detail: string,
+		readonly retry: boolean,
+	) {
+		super(detail);
+	}
+}
 type ActiveOperation = {
 	kind: "check" | "explain";
 	abort: AbortController;
@@ -115,7 +130,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 	let inFlight: ActiveOperation | undefined;
 	let lastCompletedCheck: { key: string; finding: Finding | null; resolveHeaders?: SideModel["resolveHeaders"] } | undefined;
 	let nextStartAt = 0;
-	let cooldownUntil = 0;
+	const cooldowns = new Map<string, number>();
 	let unsubscribeKeys: (() => void) | undefined;
 	let warnedThisSession = false;
 	// Kept per running omp, not in the store: cards nobody answers in other panes must not quiet this one.
@@ -124,14 +139,51 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	const active = (ctx: ExtensionContext) => ctx.hasUI && ctx.mode === "tui" && ctx.agent.kind === "main";
 
-	async function ask(ctx: ExtensionContext, model: SideModel, system: string, request: string, op: ActiveOperation) {
+	/** Side models in fallback order: the configured role, Codex gpt-6-luna when a Codex login exists, then the session's model. */
+	function sideModels(ctx: ExtensionContext): SideModel[] {
+		const models: SideModel[] = [];
+		const luna = ctx.models.resolve(CODEX_FALLBACK);
+		for (const model of [ctx.models.resolve(MODEL), luna && ctx.modelRegistry.hasConfiguredAuth(luna) ? luna : undefined, ctx.model]) {
+			if (model && !models.some(m => m.provider === model.provider && m.id === model.id)) models.push(model);
+		}
+		return models;
+	}
+
+	/** Retries transient failures with growing spacing, then falls back to the next side model. */
+	async function ask(ctx: ExtensionContext, system: string, request: string, op: ActiveOperation): Promise<string> {
+		const models = sideModels(ctx);
+		if (models.length === 0) {
+			throw new SideFailure("no side model", `no model matches ${MODEL}; set modelRoles.smol in your omp config`, false);
+		}
+		let failure: SideFailure | undefined;
+		for (const model of models) {
+			for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+				try {
+					return await askOnce(ctx, model, system, request, op);
+				} catch (error) {
+					op.abort.signal.throwIfAborted();
+					if (!(error instanceof SideFailure)) throw error;
+					failure = error;
+					logger.warn(`${NAME}: side request attempt ${attempt} failed`, { error: error.message });
+					// The 5 s request spacing is the backoff before the retry or the next model.
+					if (!error.retry) break;
+				}
+			}
+		}
+		throw failure;
+	}
+
+	async function askOnce(ctx: ExtensionContext, model: SideModel, system: string, request: string, op: ActiveOperation) {
 		const { signal } = op.abort;
 		const requestSessionId = op.sessionId;
+		const name = `${model.provider}/${model.id}`;
 		while (true) {
 			signal.throwIfAborted();
 			const now = performance.now();
-			if (cooldownUntil > now) {
-				throw new Error(`side requests cooling down; try again in ${Math.ceil((cooldownUntil - now) / 1000)} s`);
+			const until = cooldowns.get(name) ?? 0;
+			if (until > now) {
+				const seconds = Math.ceil((until - now) / 1000);
+				throw new SideFailure(`busy, retry in ${seconds} s`, `${name}: cooling down for ${seconds} s`, false);
 			}
 			const waitMs = nextStartAt - now;
 			if (waitMs <= 0) break;
@@ -150,7 +202,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 				{ systemPrompt: [system], messages: [{ role: "user", content: request, timestamp: Date.now() }] },
 				{
 					apiKey,
-					reasoning: Effort.High,
+					reasoning: model.provider === "openai-codex" ? Effort.Max : Effort.High,
 					// The plugin deadline owns slow starts, without a second provider watchdog.
 					streamFirstEventTimeoutMs: 0,
 					signal: AbortSignal.any([signal, timeout]),
@@ -164,18 +216,21 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		} catch (error) {
 			signal.throwIfAborted();
 			if (inFlight !== op || ctx.sessionManager.getSessionId() !== requestSessionId) throw error;
-			if (timeout.aborted) throw new Error(`${model.provider}/${model.id}: no reply within ${REQUEST_TIMEOUT_MS / 1000} s`);
+			if (timeout.aborted) throw new SideFailure("timed out", `${name}: no reply within ${REQUEST_TIMEOUT_MS / 1000} s`, false);
 			const message =
 				typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
 					? error.message
 					: errorText(error);
-			let reason = parseRateLimitReason(message);
 			const status = reply?.errorStatus ?? (typeof error === "object" && error !== null && "status" in error ? error.status : undefined);
-			const httpStatus =
-				status ?? /(?:^|\bHTTP(?: error)?\s+|\bstatus(?: code)?\s*[:=]?\s*)(429|402)\b/i.exec(message)?.[1];
+			const httpStatus = Number(status ?? /(?:^|\bHTTP(?: error)?\s+|\bstatus(?: code)?\s*[:=]?\s*)([1-5]\d\d)\b/i.exec(message)?.[1]);
+			// Server-side overload ("high demand", 503) clears in seconds, so it is retried before any cooldown.
+			if (httpStatus === 408 || httpStatus >= 500 || /overload|high demand|unavailable|try again later|internal error|fetch failed|socket|ECONNRESET|ETIMEDOUT/i.test(message)) {
+				throw new SideFailure("busy", `${name}: ${message}`, true);
+			}
+			let reason = parseRateLimitReason(message);
 			if (reason === "UNKNOWN") {
-				if (httpStatus === 429 || httpStatus === "429") reason = "RATE_LIMIT_EXCEEDED";
-				else if (httpStatus === 402 || httpStatus === "402") reason = "QUOTA_EXHAUSTED";
+				if (httpStatus === 429) reason = "RATE_LIMIT_EXCEEDED";
+				else if (httpStatus === 402) reason = "QUOTA_EXHAUSTED";
 			}
 			if (
 				reason === "RATE_LIMIT_EXCEEDED" ||
@@ -184,29 +239,34 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 				reason === "QUOTA_EXHAUSTED" ||
 				reason === "INSUFFICIENT_G1_CREDITS_BALANCE"
 			) {
-				cooldownUntil = Math.max(cooldownUntil, performance.now() + calculateRateLimitBackoffMs(reason));
+				const until = Math.max(cooldowns.get(name) ?? 0, performance.now() + calculateRateLimitBackoffMs(reason));
+				cooldowns.set(name, until);
+				const seconds = Math.ceil((until - performance.now()) / 1000);
+				throw new SideFailure(`busy, retry in ${seconds} s`, `${name}: ${message}; cooling down for ${seconds} s`, false);
 			}
-			const remaining = Math.ceil(Math.max(0, cooldownUntil - performance.now()) / 1000);
-			throw new Error(`${model.provider}/${model.id}: ${message}${remaining ? `; side requests cooling down for ${remaining} s` : ""}`);
+			throw new SideFailure("request failed", `${name}: ${message}`, false);
 		}
-		if (reply.stopReason === "length") throw new Error(`${model.provider}/${model.id}: reply cut off at the model's output token limit`);
-		return reply.content
+		if (reply.stopReason === "length") throw new SideFailure("reply too long", `${name}: reply cut off at the model's output token limit`, false);
+		const text = reply.content
 			.filter(part => part.type === "text")
 			.map(part => part.text)
 			.join("")
 			.trim();
+		if (!text) throw new SideFailure("empty reply", `${name}: empty reply`, true);
+		return text;
 	}
 
 	function transcript(ctx: ExtensionContext): string {
 		return buildTranscript(ctx.sessionManager.getBranch(), MAX_TRANSCRIPT_CHARS);
 	}
 
-	/** Logs every failure; tells the person only when they asked for it or the first time in a session. */
+	/** Logs every failure; shows a one-line card only when they asked for it or the first time in a session. */
 	function report(ctx: ExtensionContext, what: string, error: unknown, loud: boolean) {
 		logger.warn(`${NAME}: ${what} failed`, { error: errorText(error) });
 		if (!loud && warnedThisSession) return;
 		warnedThisSession = true;
-		ctx.ui.notify(`${NAME}: ${what} failed: ${errorText(error)}`, "error");
+		view = { kind: "failed", text: `Couldn’t ${what} (${error instanceof SideFailure ? error.short : "unexpected error"})` };
+		render(ctx);
 	}
 
 	function render(ctx: ExtensionContext) {
@@ -221,6 +281,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 				tui = ui;
 				const suggestion = theme.isLight ? SUGGESTION.light : SUGGESTION.dark;
 				const ink = inkFor(suggestion);
+				if (current.kind === "failed") return { render: () => ["", failedLine(ink, current.text)], invalidate() { } };
 				const { tag, topic } = current.finding;
 				const shimmer = current.kind === "explaining" && shimmerEnabled();
 				// omp disposes a widget when it is replaced or removed, which stops the redraws.
@@ -238,7 +299,6 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 						: [];
 				return {
 					render(width: number): string[] {
-						if (current.kind === "failed") return ["", failedLine(ink)];
 						if (current.kind === "explaining") {
 							const label = shimmer
 								? shimmerText("One moment…", theme, { low: "dim", mid: "muted", high: { ansi: suggestion } })
@@ -281,7 +341,8 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	function startCheck(ctx: ExtensionContext, manual: boolean) {
 		const store = readStore();
-		const busy = !store.enabled ? "it is off (/ysk on)" : inFlight ? "a check is already running" : view ? "a card is already showing" : undefined;
+		const card = view && view.kind !== "failed";
+		const busy = !store.enabled ? "it is off (/ysk on)" : inFlight ? "a check is already running" : card ? "a card is already showing" : undefined;
 		if (busy) {
 			if (manual) ctx.ui.notify(`${NAME}: not checking, ${busy}.`, "info");
 			return;
@@ -292,13 +353,17 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			if (DEBUG) ctx.ui.notify(`${NAME}: skipped a check after ${ignoredInARow} ignored cards; ${checksToSkip} more to skip.`, "info");
 			return;
 		}
+		// A new check replaces the card a failed one left.
+		if (view) {
+			view = undefined;
+			render(ctx);
+		}
 		const op: ActiveOperation = { kind: "check", abort: new AbortController(), sessionId: ctx.sessionManager.getSessionId() };
 		inFlight = op;
 		if (manual) ctx.ui.notify(`${NAME}: checking the session…`, "info");
 		void (async () => {
-			const model = ctx.models.resolve(MODEL);
-			if (!model) throw new Error(`no model matches ${MODEL}; set modelRoles.smol in your omp config`);
-			const resolveHeaders = model.resolveHeaders;
+			const model = sideModels(ctx)[0];
+			const resolveHeaders = model?.resolveHeaders;
 			const { seen, known } = store;
 			const request = checkRequest(transcript(ctx), seen, known);
 			// Static headers can contain secrets, so this key stays private and is never logged or persisted.
@@ -317,7 +382,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 			if (cached) {
 				finding = cached.finding;
 			} else {
-				reply = await ask(ctx, model, CHECK_SYSTEM, request, op);
+				reply = await ask(ctx, CHECK_SYSTEM, request, op);
 				finding = parseCheckReply(reply);
 			}
 			if (inFlight !== op || op.abort.signal.aborted || ctx.sessionManager.getSessionId() !== op.sessionId || view) return;
@@ -334,7 +399,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		})()
 			.catch(error => {
 				if (inFlight === op && !op.abort.signal.aborted && ctx.sessionManager.getSessionId() === op.sessionId) {
-					report(ctx, "check", error, manual);
+					report(ctx, "check the session", error, manual);
 				}
 			})
 			.finally(() => {
@@ -343,7 +408,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 	}
 
 	function explain(ctx: ExtensionContext, depth: Depth) {
-		if (!view || view.kind === "explaining") return;
+		if (!view || view.kind === "explaining" || view.kind === "failed") return;
 		const finding = view.finding;
 		const previous = view.kind === "explained" ? view.text : undefined;
 		const op: ActiveOperation = { kind: "explain", abort: new AbortController(), sessionId: ctx.sessionManager.getSessionId() };
@@ -351,23 +416,21 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 		view = { kind: "explaining", finding };
 		render(ctx);
 		void (async () => {
-			const model = ctx.models.resolve(MODEL);
-			if (!model) throw new Error(`no model matches ${MODEL}; set modelRoles.smol in your omp config`);
-			const text = await ask(ctx, model, EXPLAIN_SYSTEM, explainRequest(transcript(ctx), finding, depth, previous), op);
+			const text = await ask(ctx, EXPLAIN_SYSTEM, explainRequest(transcript(ctx), finding, depth, previous), op);
 			if (inFlight !== op || op.abort.signal.aborted || ctx.sessionManager.getSessionId() !== op.sessionId) return;
 			view = { kind: "explained", finding, text };
 			render(ctx);
 		})()
 			.catch(error => {
 				if (inFlight !== op || op.abort.signal.aborted || ctx.sessionManager.getSessionId() !== op.sessionId) return;
-				report(ctx, "explanation", error, true);
-				// A failed rewrite keeps the explanation already on screen; a failed first one leaves the failed card.
+				// A failed rewrite quietly keeps the explanation already on screen; a failed first one leaves the failed card.
 				if (previous) {
+					logger.warn(`${NAME}: explanation failed`, { error: errorText(error) });
 					view = { kind: "explained", finding, text: previous };
+					render(ctx);
 				} else {
-					view = { kind: "failed", finding };
+					report(ctx, "write that explanation", error, true);
 				}
-				render(ctx);
 			})
 			.finally(() => {
 				if (inFlight === op) inFlight = undefined;
@@ -376,6 +439,7 @@ export default function youShouldKnow(pi: ExtensionAPI): void {
 
 	function act(action: Action, ctx: ExtensionContext) {
 		if (!view) return;
+		if (view.kind === "failed") return clear(ctx);
 		const { finding } = view;
 		if (action === "chat" && ctx.ui.getEditorText().trim()) {
 			ctx.ui.notify("Your prompt box has text in it. Send or clear it, then press 2 again.", "warning");

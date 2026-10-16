@@ -181,8 +181,8 @@ describe("card layout matches Claude Code's terminal card", () => {
 		expect(choiceLines(OFFER_CHOICES, 30, plain)).toEqual(["  1: Learn more", "  2: Knew this already", "  0: Dismiss"]);
 	});
 
-	test("a failed first explanation leaves one line with its only choice", () => {
-		expect(failedLine(plain)).toBe("✦ Couldn’t write that explanation · 0: OK");
+	test("a failed side request leaves one line with its only choice", () => {
+		expect(failedLine(plain, "Couldn’t check the session (busy)")).toBe("✦ Couldn’t check the session (busy) · 0: OK");
 		expect(actionFor("failed", "0")).toBe("dismiss");
 		expect(actionFor("failed", "1")).toBeUndefined();
 	});

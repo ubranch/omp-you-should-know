@@ -277,7 +277,7 @@ export type View =
 	| { kind: "offer"; finding: Finding; promptsSince: number }
 	| { kind: "explaining"; finding: Finding }
 	| { kind: "explained"; finding: Finding; text: string }
-	| { kind: "failed"; finding: Finding };
+	| { kind: "failed"; text: string };
 
 export type Action = "learn" | "know" | "dismiss" | "understood" | "chat" | Exclude<Depth, "first">;
 
@@ -360,9 +360,9 @@ export function choiceLines(choices: readonly Choice[], width: number, ink: Ink)
 	return lines;
 }
 
-/** The card left when the first explanation could not be written; 0 closes it. */
-export function failedLine(ink: Ink): string {
-	return `${ink.accent(STAR)} Couldn’t write that explanation ${ink.dim("·")} ${ink.accent("0:")} OK`;
+/** The one-line card a failed side request leaves instead of an error in the chat; 0 closes it. */
+export function failedLine(ink: Ink, text: string): string {
+	return `${ink.accent(STAR)} ${text} ${ink.dim("·")} ${ink.accent("0:")} OK`;
 }
 
 /** Splits an explanation into Markdown text and fenced sketches; sketches are shown without their fences. */

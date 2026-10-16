@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const fixture = fileURLToPath(new URL("./fixtures/extension-host.mjs", import.meta.url));
 type Provider = "google" | "google-antigravity";
 type Scenario =
-	| "reasoning" | "token-budget" | "pacing" | "cooldown" | "http-429" | "http-402"
+	| "reasoning" | "token-budget" | "pacing" | "cooldown" | "http-429" | "http-402" | "http-503" | "fallback"
 	| "warning-reset" | "first-event" | "cancel-pacing" | "switch" | "shutdown"
 	| "stale-goal" | "pending-boundaries" | "pending-explanation" | "context" | "cache-duplicate"
 	| "cache-inputs" | "cache-model" | "cache-header-config" | "cache-lifecycle" | "cache-error" | "cache-malformed" | "cache-memory";
@@ -19,6 +19,7 @@ interface GoogleRequest {
 	};
 }
 type ReceivedRequest = {
+	path: string;
 	receivedAt: number;
 	repliedAt?: number;
 	rateLimited: boolean;
@@ -63,6 +64,12 @@ function expectPacedMisses(requests: ReceivedRequest[]) {
 	for (let i = 1; i < requests.length; i++) {
 		expect(requests[i]!.receivedAt - requests[i - 1]!.receivedAt).toBeGreaterThanOrEqual(4_900);
 	}
+}
+
+function failedCards(result: FixtureResult): string[] {
+	const lines = result.cards.flat().filter(line => line.includes("Couldn’t"));
+	expect(result.notifications.filter(n => n.kind === "error")).toEqual([]);
+	return lines;
 }
 
 async function reproduce(scenario: Scenario, provider: Provider = "google-antigravity"): Promise<FixtureResult> {
@@ -137,43 +144,48 @@ test("completed /ysk checks queue behind request pacing instead of hitting capac
 
 test("a capacity failure sets cooldown and the next /ysk check sends no HTTP request", async () => {
 	const result = await reproduce("cooldown");
-	expect(result.notifications.filter(n => n.kind === "error")).toHaveLength(2);
+	expect(failedCards(result)).toHaveLength(2);
 	expect(result.notifications.filter(n => n.message.includes("nothing worth flagging"))).toHaveLength(1);
-	expect(result).toMatchObject({
-		requests: [{ rateLimited: false }, { rateLimited: true }],
-		currentCard: [],
-	});
+	expect(result.requests.map(r => r.rateLimited)).toEqual([false, true]);
+	expect(result.currentCard.join("\n")).toContain("Couldn’t check the session (busy, retry in");
 }, 30_000);
 
 const opaqueStatuses: (429 | 402)[] = [429, 402];
 for (const status of opaqueStatuses) {
 	test(`opaque Google HTTP ${status} sets cooldown without resubmitting the next /ysk check`, async () => {
 		const result = await reproduce(`http-${status}`, "google");
-		const errors = result.notifications.filter(n => n.kind === "error");
-		expect(errors).toHaveLength(2);
-		for (const error of errors) {
-			expect(error.message).toContain("cooling down");
-			expect(error.message).toMatch(/\b[1-9]\d* s\b/);
-		}
+		const cards = failedCards(result);
+		expect(cards).toHaveLength(2);
+		for (const card of cards) expect(card).toMatch(/Couldn’t check the session \(busy, retry in [1-9]\d* s\) · 0: OK/);
 		expect(result.notifications.filter(n => n.message.includes("nothing worth flagging"))).toHaveLength(1);
-		expect(result).toMatchObject({
-			requests: [{ rateLimited: false }, { rateLimited: true }],
-			currentCard: [],
-		});
+		expect(result.requests.map(r => r.rateLimited)).toEqual([false, true]);
 	}, 30_000);
 }
 
-test("automatic warnings reset on session switch after an opaque HTTP failure", async () => {
+test("automatic failures show one quiet card per session, never a chat error", async () => {
 	const result = await reproduce("warning-reset", "google");
-	expect(result.notifications.filter(n => n.kind === "error").map(n => n.sessionId)).toEqual([
-		"fixture-session-a",
-		"fixture-session-b",
-	]);
+	expect(failedCards(result)).toHaveLength(2);
 	expect(result).toMatchObject({
 		requests: [{ rateLimited: false }, { rateLimited: false }],
-		currentCard: [],
 		paced: true,
 	});
+}, 30_000);
+
+test("a high-demand 503 is retried and the check completes without any error shown", async () => {
+	const result = await reproduce("http-503", "google");
+	expectNoFinding(result, 1);
+	expect(failedCards(result)).toEqual([]);
+	expect(result.requests).toHaveLength(2);
+	expectPacedMisses(result.requests);
+}, 30_000);
+
+test("a side model that stays unavailable falls back to the session model", async () => {
+	const result = await reproduce("fallback", "google");
+	expectNoFinding(result, 1);
+	expect(failedCards(result)).toEqual([]);
+	const paths = result.requests.map(r => r.path);
+	expect(new Set(paths).size).toBe(2);
+	expect(paths.at(-1)).not.toBe(paths[0]);
 }, 30_000);
 
 test("/ysk off cancels a pacing wait without sending its delayed request", async () => {
@@ -316,7 +328,7 @@ test("optimization: session switch, off and shutdown discard the completed cache
 
 test("optimization: a failed check is not cached but the following successful check is", async () => {
 	const result = await reproduce("cache-error", "google");
-	expect(result.notifications.filter(n => n.kind === "error")).toHaveLength(1);
+	expect(failedCards(result)).toHaveLength(1);
 	expect(result.notifications.filter(n => n.message.includes("nothing worth flagging"))).toHaveLength(2);
 	expect(result.currentCard).toEqual([]);
 	expect(result.requests).toHaveLength(2);

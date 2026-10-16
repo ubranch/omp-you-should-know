@@ -23,7 +23,7 @@ Bun.plugin({
 const host = await import("@oh-my-pi/pi-coding-agent");
 
 const [scenario, provider] = process.argv.slice(2);
-const scenarios = ["reasoning", "token-budget", "pacing", "cooldown", "http-429", "http-402", "warning-reset", "first-event", "cancel-pacing", "switch", "shutdown", "stale-goal", "pending-boundaries", "pending-explanation", "context", "cache-duplicate", "cache-inputs", "cache-model", "cache-header-config", "cache-lifecycle", "cache-error", "cache-malformed", "cache-memory"];
+const scenarios = ["reasoning", "token-budget", "pacing", "cooldown", "http-429", "http-402", "http-503", "fallback", "warning-reset", "first-event", "cancel-pacing", "switch", "shutdown", "stale-goal", "pending-boundaries", "pending-explanation", "context", "cache-duplicate", "cache-inputs", "cache-model", "cache-header-config", "cache-lifecycle", "cache-error", "cache-malformed", "cache-memory"];
 assert.ok(scenarios.includes(scenario));
 assert.ok(["google", "google-antigravity"].includes(provider));
 const opaqueStatus = { "http-429": 429, "http-402": 402 }[scenario];
@@ -79,14 +79,15 @@ const server = Bun.serve({
 	async fetch(request) {
 		const url = new URL(request.url);
 		assert.equal(request.method, "POST");
-		assert.equal(url.pathname, provider === "google" ? `/v1beta/models/${model.id}:streamGenerateContent` : "/v1internal:streamGenerateContent");
+		const modelPaths = [model, sessionModel].map(m => `/v1beta/models/${m.id}:streamGenerateContent`);
+		assert.ok(provider === "google" ? modelPaths.includes(url.pathname) : url.pathname === "/v1internal:streamGenerateContent");
 		assert.equal(url.search, "?alt=sse");
 		assert.equal(request.headers.get(provider === "google" ? "x-goog-api-key" : "authorization"), provider === "google" ? "fixture-key" : "Bearer fixture-token");
 		const receivedAt = performance.now();
 		const tooSoon = scenario === "pacing" && lastReplyAt !== undefined && receivedAt - lastReplyAt < 1_000;
 		const limited = tooSoon || (scenario === "cooldown" && requests.length === 1) || (opaqueStatus !== undefined && requests.length >= 1);
 		const record = {
-			provider, body: await request.json(), receivedAt, rateLimited: limited,
+			provider, path: url.pathname, body: await request.json(), receivedAt, rateLimited: limited,
 			fixtureStaticHeader: request.headers.get("x-test-static"),
 			fixtureResolvedHeader: request.headers.get("x-test-resolved"),
 		};
@@ -100,6 +101,10 @@ const server = Bun.serve({
 		}
 		if (opaqueStatus !== undefined && limited) return new Response(null, { status: opaqueStatus });
 		if (scenario === "warning-reset" || (scenario === "cache-error" && requests.length === 1)) return new Response(null, { status: 400 });
+		if ((scenario === "http-503" && requests.length === 1) || (scenario === "fallback" && url.pathname === modelPaths[0])) {
+			const error = { code: 503, status: "UNAVAILABLE", message: "This model is currently experiencing high demand. Please try again later." };
+			return new Response(JSON.stringify({ error }), { status: 503, headers: { "Content-Type": "application/json" } });
+		}
 		if (limited) {
 			const error = { code: 429, status: "RESOURCE_EXHAUSTED", message: "HTTP 429 RESOURCE_EXHAUSTED: capacity exhausted" };
 			return new Response(`data: ${JSON.stringify({ error })}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
@@ -157,6 +162,13 @@ async function resolveFixtureHeaders(signal) {
 if (scenario === "cache-header-config") {
 	model = { ...model, headers: { "X-Test-Static": "A" }, resolveHeaders: resolveFixtureHeaders };
 }
+// The session's own model, which the plugin falls back to; a different model only in the fallback scenario.
+let sessionModel = model;
+if (scenario === "fallback") {
+	const alternate = getBundledModel(provider, "gemini-2.5-flash");
+	assert.ok(alternate, "The installed OMP catalog must contain the fallback model");
+	sessionModel = { ...alternate, baseUrl: model.baseUrl };
+}
 const boundary = (name, values) => new Proxy(values, {
 	get(target, key) {
 		if (key in target || typeof key === "symbol") return target[key];
@@ -168,13 +180,18 @@ const ctx = boundary("context", {
 	mode: "tui",
 	agent: { kind: "main" },
 	cwd: process.cwd(),
-	get model() { return model; },
+	get model() { return scenario === "fallback" ? sessionModel : model; },
 	models: boundary("models", {
-		resolve(selector) { assert.equal(selector, "@smol"); return model; },
+		resolve(selector) {
+			if (selector === "openai-codex/gpt-6-luna") return getBundledModel("openai-codex", "gpt-6-luna");
+			assert.equal(selector, "@smol");
+			return model;
+		},
 	}),
 	modelRegistry: boundary("modelRegistry", {
+		hasConfiguredAuth: selected => selected.provider !== "openai-codex",
 		resolver(selected, id) {
-			assert.equal(selected, model);
+			assert.ok(selected === model || selected === sessionModel);
 			assert.equal(id, sessionId);
 			resolverCalls++;
 			return provider === "google" ? "fixture-key" : JSON.stringify({ token: "fixture-token", projectId: "fixture-project" });
@@ -216,8 +233,9 @@ assert.ok(command);
 const emit = async (type, event = {}) => {
 	for (const handler of extension.handlers.get(type) ?? []) await handler({ type, ...event }, ctx);
 };
+const failed = () => currentCard.some(line => line.includes("Couldn’t"));
 const completed = (beforeNotifications, beforeCards) =>
-	notifications.slice(beforeNotifications).some(n => n.kind === "error" || n.message.includes("nothing worth flagging")) ||
+	notifications.slice(beforeNotifications).some(n => n.message.includes("nothing worth flagging")) ||
 	cards.slice(beforeCards).some(card => card.length > 0);
 const check = async () => {
 	const beforeNotifications = notifications.length;
@@ -230,9 +248,9 @@ try {
 	await emit("session_start");
 	if (scenario === "reasoning") {
 		await emit("turn_end", { turnIndex: 5 });
-		await waitFor(() => currentCard.some(line => line.includes(topic)) || notifications.some(n => n.kind === "error"));
+		await waitFor(() => currentCard.some(line => line.includes(topic)) || failed());
 		await command.handler("1", ctx);
-		await waitFor(() => currentCard.some(line => line.includes(explanation)) || notifications.some(n => n.kind === "error"));
+		await waitFor(() => currentCard.some(line => line.includes(explanation)) || failed());
 		assert.ok(cards.some(card => card.some(line => line.includes(topic))), "The finding must be visible before explanation");
 	} else if (scenario === "pacing" || scenario === "cooldown" || opaqueStatus !== undefined) {
 		await check();
@@ -242,13 +260,15 @@ try {
 			changeInput();
 			await check();
 		}
+	} else if (scenario === "http-503" || scenario === "fallback") {
+		await check();
 	} else if (scenario === "warning-reset") {
 		await emit("turn_end", { turnIndex: 5 });
-		await waitFor(() => notifications.some(n => n.kind === "error"));
+		await waitFor(failed);
 		sessionId = "fixture-session-b";
 		await emit("session_switch", { reason: "new" });
 		await emit("turn_end", { turnIndex: 11 });
-		await waitFor(() => notifications.some(n => n.kind === "error" && n.sessionId === "fixture-session-b"));
+		await waitFor(failed);
 	} else if (scenario === "cancel-pacing") {
 		await check();
 		changeInput();
@@ -288,10 +308,10 @@ try {
 		branch.push(userEntry("Explain how to verify rollback readiness."));
 		await emit("before_agent_start", { prompt: branch.at(-1).message.content });
 		releaseReply();
-		await waitFor(() => currentCard.some(line => line.includes(explanation)) || notifications.some(n => n.kind === "error"));
+		await waitFor(() => currentCard.some(line => line.includes(explanation)) || failed());
 		const beforeCards = cards.length;
 		await command.handler("5", ctx);
-		await waitFor(() => cards.slice(beforeCards).some(card => card.some(line => line.includes(explanation))) || notifications.some(n => n.kind === "error"));
+		await waitFor(() => cards.slice(beforeCards).some(card => card.some(line => line.includes(explanation))) || failed());
 	} else if (scenario === "context") {
 		const agentEntry = content => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text: content }], timestamp: 2 } });
 		branch = [
@@ -374,7 +394,7 @@ try {
 		const aborted = transports[0].signal.aborted;
 		releaseReply();
 		await Promise.allSettled(fetches);
-		if (!aborted) await waitFor(() => currentCard.some(line => line.includes(topic)) || notifications.some(n => n.kind === "error"));
+		if (!aborted) await waitFor(() => currentCard.some(line => line.includes(topic)) || failed());
 		await setImmediate();
 	}
 	const result = {

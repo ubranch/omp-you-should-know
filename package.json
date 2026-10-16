@@ -1,6 +1,6 @@
 {
 	"name": "omp-you-should-know",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"description": "A side agent watches your back while omp works and flags things you might miss, in a card above the prompt.",
 	"license": "MIT",
 	"type": "module",
