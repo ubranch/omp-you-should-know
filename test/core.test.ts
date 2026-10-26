@@ -32,9 +32,12 @@ test("checks after every sixth step of a run", () => {
 });
 
 describe("parseCheckReply", () => {
-	test("none means nothing to show", () => {
+	test("none, nothing, or no issues mean nothing to show", () => {
 		expect(parseCheckReply("learn: none")).toBeUndefined();
 		expect(parseCheckReply("**learn:** None.")).toBeUndefined();
+		expect(parseCheckReply("learn: nothing to flag.")).toBeUndefined();
+		expect(parseCheckReply("learn: no issues found.")).toBeUndefined();
+		expect(parseCheckReply("learn: n/a")).toBeUndefined();
 	});
 
 	test("reads topic, tag and explanation, stripping markdown and quotes", () => {
@@ -133,6 +136,22 @@ describe("buildTranscript", () => {
 		expect(out).toBe(
 			'USER: fix the login\nAGENT: Looking.\nAGENT CALLS bash: {"command":"rm -rf dist"}\nRESULT bash (error): denied',
 		);
+	});
+
+	test("long tool results keep head and tail so final outcome remains visible", () => {
+		const longResult = `warning: deprecated API\n${"x".repeat(500)}\n10 passed, 0 failed`;
+		const out = buildTranscript(
+			[
+				user("run tests"),
+				{
+					type: "message",
+					message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: longResult }] },
+				},
+			],
+			10_000,
+		);
+		expect(out).toContain("warning: deprecated API");
+		expect(out).toContain("10 passed, 0 failed");
 	});
 
 	test("starts at the last compaction", () => {

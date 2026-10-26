@@ -68,7 +68,7 @@ export function parseCheckReply(reply: string): Finding | undefined {
 	}
 	topic = topic === undefined ? undefined : cleanLine(topic);
 	if (topic === undefined) throw new Error(`side agent reply has no "learn:" line: ${reply.slice(0, 200)}`);
-	if (topic === "" || /^none\b/i.test(topic)) return undefined;
+	if (topic === "" || /^(?:none|nothing|n\/a|no\s+(?:issues?|findings?|risk|action|consequence)s?)\b/i.test(topic)) return undefined;
 	if (topic.length > MAX_TOPIC_CHARS) throw new Error(`side agent topic is over ${MAX_TOPIC_CHARS} characters`);
 	return {
 		topic: /[.!?]$/.test(topic) ? topic : `${topic}.`,
@@ -154,7 +154,8 @@ function linesOf(entry: TranscriptEntry): string[] {
 	if (message.role === "user") return [`USER: ${textOf(message.content)}`];
 	if (message.role === "toolResult") {
 		const label = `RESULT ${message.toolName ?? "tool"}${message.isError ? " (error)" : ""}`;
-		return [`${label}: ${clip(textOf(message.content), MAX_TOOL_RESULT)}`];
+		const raw = textOf(message.content).replace(/\s+/g, " ").trim();
+		return [`${label}: ${excerpt(raw, MAX_TOOL_RESULT)}`];
 	}
 	if (message.role !== "assistant") return [];
 	const lines: string[] = [];
